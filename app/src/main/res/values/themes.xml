@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Bare host theme; the real look comes from Compose's MaterialTheme. -->
+    <style name="Theme.ItantraRelay" parent="@android:style/Theme.Material.Light.NoActionBar" />
+</resources>
