@@ -1,0 +1,7 @@
+{
+  "name": "protocol",
+  "version": "0.1.0",
+  "description": "SIH26173 LoRa extender protocol layer: packet codec, CRC, fragmentation, reassembly, airtime. No Arduino dependencies.",
+  "frameworks": "*",
+  "platforms": "*"
+}

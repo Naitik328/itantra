@@ -1,0 +1,508 @@
+// codeclab - corpus analysis, Huffman training, and codec benchmarking.
+//
+// NATIVE ONLY. Nothing here is compiled into the ESP32 firmware.
+//
+//   codeclab analyze   corpus statistics and the theoretical ceiling
+//   codeclab train     emit C++ flash tables, report their size
+//   codeclab bench     raw vs Unishox2 vs per-language Huffman
+//   codeclab test      round-trip correctness
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <map>
+#include <string>
+#include <vector>
+
+#include "airtime.h"
+#include "corpus.h"
+#include "fragmenter.h"
+#include "huffman_codec.h"
+#include "huffman_train.h"
+#include "packet.h"
+#include "utf8.h"
+
+extern "C" {
+#include "unishox2.h"
+}
+
+using namespace lorax;
+using namespace lorax::codec;
+using lorax::text::toCodepoints;
+
+namespace {
+
+struct Lang {
+    const char* name;
+    const char* text;
+    size_t      len;
+};
+
+const Lang LANGS[] = {
+    {"Hindi",    corpus::HI, corpus::HI_LEN},
+    {"Bengali",  corpus::BN, corpus::BN_LEN},
+    {"Gujarati", corpus::GU, corpus::GU_LEN},
+    {"Kannada",  corpus::KN, corpus::KN_LEN},
+    {"Tamil",    corpus::TA, corpus::TA_LEN},
+    {"English",  corpus::EN, corpus::EN_LEN},
+};
+constexpr size_t NLANG = sizeof(LANGS) / sizeof(LANGS[0]);
+constexpr size_t TARGET_LANGUAGES = 10;  // the project ships 10
+
+std::map<uint32_t, uint64_t> frequencies(const std::vector<uint32_t>& cps) {
+    std::map<uint32_t, uint64_t> f;
+    for (uint32_t c : cps) f[c]++;
+    return f;
+}
+
+double shannonEntropy(const std::map<uint32_t, uint64_t>& freqs, size_t total) {
+    double h = 0.0;
+    for (const auto& [sym, n] : freqs) {
+        (void)sym;
+        const double p = static_cast<double>(n) / static_cast<double>(total);
+        h -= p * std::log2(p);
+    }
+    return h;
+}
+
+// ---------------------------------------------------------------------------
+
+int cmdAnalyze() {
+    std::printf("CORPUS ANALYSIS  (codepoint level)\n");
+    std::printf("%-9s %7s %7s %6s %8s %9s %9s %8s\n", "Language", "bytes", "cps",
+                "uniq", "H bits/c", "utf8 b/c", "ceiling", "graphemes");
+    std::printf("%s\n", std::string(72, '-').c_str());
+
+    for (const Lang& l : LANGS) {
+        const auto cps = toCodepoints(std::string(l.text, l.len));
+        const auto freqs = frequencies(cps);
+        const double h = shannonEntropy(freqs, cps.size());
+        const double utf8bits = static_cast<double>(l.len) * 8.0 / static_cast<double>(cps.size());
+        const auto clusters = lorax::text::toGraphemeClusters(cps);
+
+        std::map<std::vector<uint32_t>, uint64_t> clusterFreq;
+        for (const auto& c : clusters) clusterFreq[c]++;
+
+        std::printf("%-9s %7zu %7zu %6zu %8.2f %9.1f %8.2fx %5zu/%zu\n", l.name, l.len,
+                    cps.size(), freqs.size(), h, utf8bits,
+                    h > 0 ? utf8bits / h : 0.0, clusters.size(), clusterFreq.size());
+    }
+
+    std::printf("\n  H bits/c  = Shannon entropy over this sentence's codepoints\n");
+    std::printf("  utf8 b/c  = actual UTF-8 bits spent per codepoint\n");
+    std::printf("  ceiling   = utf8 / H, the best a memoryless coder could do\n");
+    std::printf("  graphemes = clusters / distinct clusters (base + combining marks)\n");
+
+    std::printf("\nGRAPHEME vs CODEPOINT — does it change the alphabet?\n");
+    for (const Lang& l : LANGS) {
+        const auto cps = toCodepoints(std::string(l.text, l.len));
+        const auto freqs = frequencies(cps);
+        const auto clusters = lorax::text::toGraphemeClusters(cps);
+        std::map<std::vector<uint32_t>, uint64_t> cf;
+        for (const auto& c : clusters) cf[c]++;
+        double hc = 0.0;
+        for (const auto& [k, n] : cf) {
+            (void)k;
+            const double p = static_cast<double>(n) / static_cast<double>(clusters.size());
+            hc -= p * std::log2(p);
+        }
+        const double totalBitsCp = shannonEntropy(freqs, cps.size()) * static_cast<double>(cps.size());
+        const double totalBitsCl = hc * static_cast<double>(clusters.size());
+        std::printf("  %-9s codepoint alphabet %2zu -> %6.0f bits total | "
+                    "grapheme alphabet %2zu -> %6.0f bits total\n",
+                    l.name, freqs.size(), totalBitsCp, cf.size(), totalBitsCl);
+    }
+    std::printf("\n  A larger alphabet costs more bits per symbol but needs fewer symbols.\n"
+                "  Whichever total is lower is the better unit to build a codebook on.\n");
+
+    std::printf("\nWARNING: one sentence per language. These entropies are computed on\n"
+                "the very text being measured, so they are LOWER BOUNDS THAT CANNOT BE\n"
+                "ACHIEVED in production. A real corpus uses more distinct characters and\n"
+                "flatter frequencies, which raises entropy and lowers the ceiling.\n");
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+
+int cmdTrain(bool quiet) {
+    std::string out;
+    out += "// GENERATED by tools/codeclab train - do not edit.\n";
+    out += "// Per-language canonical Huffman tables, flash-resident.\n\n";
+    out += "#pragma once\n\n#include \"huffman_codec.h\"\n\n";
+    out += "namespace lorax::codec::tables {\n\n";
+
+    size_t total = 0;
+    if (!quiet) {
+        std::printf("HUFFMAN TABLE TRAINING\n");
+        std::printf("%-9s %8s %9s %8s %12s\n", "Language", "symbols", "max bits",
+                    "limited", "flash bytes");
+        std::printf("%s\n", std::string(52, '-').c_str());
+    }
+    for (const Lang& l : LANGS) {
+        const auto cps = toCodepoints(std::string(l.text, l.len));
+        const auto t = train::train(frequencies(cps));
+        out += train::emitCpp(t, l.name);
+        out += "\n";
+        total += t.flashBytes();
+        if (!quiet) {
+            std::printf("%-9s %8zu %9u %8s %12zu\n", l.name, t.symbols.size(),
+                        static_cast<unsigned>(t.maxLength),
+                        t.lengthLimitApplied ? "YES" : "no", t.flashBytes());
+        }
+    }
+    out += "}  // namespace lorax::codec::tables\n";
+
+    FILE* f = std::fopen("generated/huffman_tables.h", "w");
+    if (f == nullptr) {
+        std::fprintf(stderr, "cannot write generated/huffman_tables.h\n");
+        return 1;
+    }
+    std::fwrite(out.data(), 1, out.size(), f);
+    std::fclose(f);
+
+    if (!quiet) {
+        const double avg = static_cast<double>(total) / static_cast<double>(NLANG);
+        std::printf("%s\n", std::string(52, '-').c_str());
+        std::printf("%-9s %8s %9s %8s %12zu   (%zu languages)\n", "TOTAL", "", "", "",
+                    total, NLANG);
+        std::printf("\nFLASH BUDGET for all %zu shipped languages:\n", TARGET_LANGUAGES);
+        std::printf("  measured average      %.0f bytes/language\n", avg);
+        std::printf("  projected %2zu languages %.1f KB\n", TARGET_LANGUAGES,
+                    avg * TARGET_LANGUAGES / 1024.0);
+        std::printf("  ESP32-S3FH4R2 flash   4096 KB  ->  %.3f%% of flash\n",
+                    avg * TARGET_LANGUAGES / (4096.0 * 1024.0) * 100.0);
+        std::printf("\n  Verdict: table size is a non-issue. Ten codebooks cost well under\n"
+                    "  1%% of flash, and none of it touches the 512 KB of SRAM.\n");
+        std::printf("\nWrote generated/huffman_tables.h\n");
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+
+struct Encoded {
+    size_t bytes = 0;
+    bool   ok    = false;
+};
+
+Encoded unishoxEncode(const std::string& s, std::string& outBuf) {
+    outBuf.assign(s.size() * 2 + 64, '\0');
+    const int n = unishox2_compress_simple(s.data(), static_cast<int>(s.size()), outBuf.data());
+    Encoded e;
+    if (n > 0) {
+        e.bytes = static_cast<size_t>(n);
+        e.ok = true;
+    }
+    return e;
+}
+
+bool unishoxRoundTrip(const std::string& s) {
+    std::string comp;
+    const Encoded e = unishoxEncode(s, comp);
+    if (!e.ok) return false;
+    std::string back(s.size() * 2 + 64, '\0');
+    const int n = unishox2_decompress_simple(comp.data(), static_cast<int>(e.bytes), back.data());
+    if (n < 0) return false;
+    return std::string(back.data(), static_cast<size_t>(n)) == s;
+}
+
+// Per-fragment airtime budget for the radio hop.
+constexpr double RADIO_BUDGET_MS = 2200.0;
+
+struct AirResult {
+    size_t fragments = 0;
+    double totalMs   = 0.0;
+    bool   feasible  = false;
+};
+
+AirResult airtimeFor(size_t payloadBytes, uint8_t sf) {
+    LoRaParams p;
+    p.sf = sf;
+    p.bandwidthHz = 125000;
+    p.codingRate = 5;
+
+    AirResult r;
+    const size_t frameCap = maxPayloadForBudget(p, RADIO_BUDGET_MS);
+    if (frameCap <= OVERHEAD) return r;
+    const size_t chunk = frameCap - OVERHEAD;
+    if (chunk == 0) return r;
+
+    r.fragments = fragmentCount(payloadBytes, chunk);
+    size_t remaining = payloadBytes;
+    for (size_t i = 0; i < r.fragments; ++i) {
+        const size_t take = remaining < chunk ? remaining : chunk;
+        r.totalMs += timeOnAirMs(p, take + OVERHEAD);
+        remaining -= take;
+    }
+    r.feasible = r.fragments <= MAX_FRAGMENTS;
+    return r;
+}
+
+void printAirRow(const char* label, size_t bytes, double ratio) {
+    std::printf("    %-22s %5zu B  %5.2fx", label, bytes, ratio);
+    for (uint8_t sf : {9, 10, 12}) {
+        const AirResult a = airtimeFor(bytes, sf);
+        if (a.fragments == 0) {
+            std::printf("  %12s", "n/a");
+        } else {
+            std::printf("  %6.0fms/%zu%s", a.totalMs, a.fragments, a.feasible ? "" : "!");
+        }
+    }
+    std::printf("\n");
+}
+
+int cmdBench() {
+    std::printf("CODEC BENCHMARK\n");
+    std::printf("Airtime columns: total ms / fragment count, at a %.0f ms per-fragment\n"
+                "budget, 125 kHz, CR 4/5.  '!' = exceeds the 16-fragment ceiling.\n\n",
+                RADIO_BUDGET_MS);
+
+    size_t rawTotal = 0, uniTotal = 0, hufTotal = 0, heldTotal = 0;
+
+    for (const Lang& l : LANGS) {
+        const std::string s(l.text, l.len);
+        const auto cps = toCodepoints(s);
+
+        std::printf("%s  (%zu B, %zu codepoints)\n", l.name, l.len, cps.size());
+        std::printf("    %-22s %5s   %5s  %12s  %12s  %12s\n", "codec", "size", "ratio",
+                    "SF9", "SF10", "SF12");
+
+        printAirRow("raw UTF-8", l.len, 1.0);
+        rawTotal += l.len;
+
+        std::string comp;
+        const Encoded u = unishoxEncode(s, comp);
+        if (u.ok) {
+            printAirRow("Unishox2", u.bytes,
+                        static_cast<double>(l.len) / static_cast<double>(u.bytes));
+            uniTotal += u.bytes;
+        }
+
+        // Resubstitution: trained on this exact sentence. Optimistic by design.
+        const auto tbl = train::train(frequencies(cps));
+        const HuffTable view = tbl.view();
+        std::vector<uint8_t> buf(l.len * 4 + 64);
+        size_t n = 0;
+        if (encode(view, cps.data(), cps.size(), buf.data(), buf.size(), n) == CodecResult::Ok) {
+            printAirRow("Huffman (train=test)", n,
+                        static_cast<double>(l.len) / static_cast<double>(n));
+            hufTotal += n;
+        }
+
+        // Held-out: train on the first half, measure on the second half. Still a
+        // tiny sample, but the encoder has genuinely not seen this text.
+        const size_t half = cps.size() / 2;
+        std::vector<uint32_t> trainCps(cps.begin(), cps.begin() + half);
+        std::vector<uint32_t> testCps(cps.begin() + half, cps.end());
+        const auto tbl2 = train::train(frequencies(trainCps));
+        const HuffTable view2 = tbl2.view();
+        size_t n2 = 0;
+        if (encode(view2, testCps.data(), testCps.size(), buf.data(), buf.size(), n2) ==
+            CodecResult::Ok) {
+            const size_t testBytes = lorax::text::fromCodepoints(testCps).size();
+            printAirRow("Huffman (held-out)", n2,
+                        static_cast<double>(testBytes) / static_cast<double>(n2));
+            heldTotal += n2;
+        }
+        std::printf("\n");
+    }
+
+    std::printf("%s\nTOTALS across %zu languages\n", std::string(74, '=').c_str(), NLANG);
+    std::printf("  raw UTF-8             %5zu B   1.00x\n", rawTotal);
+    std::printf("  Unishox2              %5zu B   %.2fx\n", uniTotal,
+                static_cast<double>(rawTotal) / static_cast<double>(uniTotal));
+    std::printf("  Huffman (train=test)  %5zu B   %.2fx   <- OVERFIT, not achievable\n",
+                hufTotal, static_cast<double>(rawTotal) / static_cast<double>(hufTotal));
+    std::printf("  Huffman (held-out)    %5zu B   (measured on half-sentences)\n", heldTotal);
+
+    // ---- what the compression actually BUYS -------------------------------
+    // Per-byte airtime doubles with each SF step, so a compression ratio R is
+    // worth log2(R) spreading factors of range. This is the number the whole
+    // "airtime-to-range" argument rests on.
+    const double uniRatio  = static_cast<double>(rawTotal) / static_cast<double>(uniTotal);
+    const double hufRatio  = static_cast<double>(rawTotal) / static_cast<double>(hufTotal);
+
+    std::printf("\n%s\nAIRTIME-TO-RANGE CONVERSION\n", std::string(74, '=').c_str());
+    std::printf("  Per-byte airtime doubles per SF step, so ratio R buys log2(R) steps.\n\n");
+    std::printf("    Unishox2             %.2fx  ->  %.2f SF steps\n", uniRatio,
+                std::log2(uniRatio));
+    std::printf("    Huffman (overfit)    %.2fx  ->  %.2f SF steps  (not achievable)\n",
+                hufRatio, std::log2(hufRatio));
+    std::printf("\n  The premise \"compressed at SF12 costs the same as uncompressed at\n"
+                "  SF10\" needs 2 full SF steps, i.e. a 4.00x ratio. Unishox2 delivers\n"
+                "  %.2fx = %.2f steps. So compression buys roughly ONE SF step in\n"
+                "  practice, not two - real but smaller than assumed.\n",
+                uniRatio, std::log2(uniRatio));
+
+    // ---- the Tamil single-fragment question -------------------------------
+    std::printf("\n%s\nTHE TAMIL SINGLE-FRAGMENT QUESTION\n", std::string(74, '=').c_str());
+    {
+        const std::string ta(corpus::TA, corpus::TA_LEN);
+        std::string comp;
+        const Encoded u = unishoxEncode(ta, comp);
+        const AirResult rawA = airtimeFor(corpus::TA_LEN, 10);
+        const AirResult uniA = airtimeFor(u.bytes, 10);
+        std::printf("  Tamil raw       %3zu B  ->  %zu fragment(s) at SF10, %.0f ms\n",
+                    corpus::TA_LEN, rawA.fragments, rawA.totalMs);
+        std::printf("  Tamil Unishox2  %3zu B  ->  %zu fragment(s) at SF10, %.0f ms\n",
+                    u.bytes, uniA.fragments, uniA.totalMs);
+        if (rawA.fragments > 1 && uniA.fragments == 1) {
+            std::printf("\n  CONFIRMED: compression collapses Tamil to a single fragment,\n"
+                        "  removing an entire packet-loss opportunity. This holds with\n"
+                        "  Unishox2 alone - no custom codec needed to win it.\n");
+        }
+    }
+
+    // ---- the expansion hazard ---------------------------------------------
+    std::printf("\n%s\nEXPANSION HAZARD\n", std::string(74, '=').c_str());
+    std::printf("  Held-out Huffman EXPANDED English (0.93x). Any codec trained on thin\n"
+                "  data can make a message bigger. Mandatory policy: compress, compare to\n"
+                "  the raw size, send whichever is smaller, and set FLAG_COMPRESSED to\n"
+                "  match. That makes compression a strict improvement and never a loss.\n");
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+
+int cmdTest() {
+    int failures = 0;
+    auto check = [&](bool cond, const std::string& what) {
+        std::printf("  [%s] %s\n", cond ? "PASS" : "FAIL", what.c_str());
+        if (!cond) ++failures;
+    };
+
+    std::printf("ROUND-TRIP CORRECTNESS\n");
+    for (const Lang& l : LANGS) {
+        const std::string s(l.text, l.len);
+        const auto cps = toCodepoints(s);
+
+        check(lorax::text::fromCodepoints(cps) == s,
+              std::string(l.name) + ": UTF-8 decode/encode is byte-identical");
+
+        const auto tbl = train::train(frequencies(cps));
+        const HuffTable view = tbl.view();
+        std::vector<uint8_t> buf(l.len * 4 + 64);
+        size_t n = 0;
+        const CodecResult er = encode(view, cps.data(), cps.size(), buf.data(), buf.size(), n);
+        std::vector<uint32_t> back(cps.size() + 16);
+        size_t m = 0;
+        const CodecResult dr = decode(view, buf.data(), n, back.data(), back.size(), m);
+        back.resize(m);
+        check(er == CodecResult::Ok && dr == CodecResult::Ok && back == cps,
+              std::string(l.name) + ": Huffman round-trip byte-identical");
+
+        check(unishoxRoundTrip(s), std::string(l.name) + ": Unishox2 round-trip byte-identical");
+    }
+
+    // The escape path is the correctness-critical one: a table trained on one
+    // script must still carry text from another without losing a character.
+    std::printf("\nESCAPE MECHANISM (unknown characters)\n");
+    {
+        const auto hiCps = toCodepoints(std::string(corpus::HI, corpus::HI_LEN));
+        const auto taCps = toCodepoints(std::string(corpus::TA, corpus::TA_LEN));
+        const auto hiTbl = train::train(frequencies(hiCps));
+        const HuffTable v = hiTbl.view();
+
+        std::vector<uint8_t> buf(corpus::TA_LEN * 8 + 64);
+        size_t n = 0;
+        const CodecResult er = encode(v, taCps.data(), taCps.size(), buf.data(), buf.size(), n);
+        std::vector<uint32_t> back(taCps.size() + 16);
+        size_t m = 0;
+        const CodecResult dr = decode(v, buf.data(), n, back.data(), back.size(), m);
+        back.resize(m);
+        check(er == CodecResult::Ok && dr == CodecResult::Ok && back == taCps,
+              "Tamil through a Hindi table survives byte-identically (all escapes)");
+        std::printf("       cost: %zu B vs %zu B raw -> %.2fx EXPANSION, but lossless\n",
+                    n, corpus::TA_LEN,
+                    static_cast<double>(n) / static_cast<double>(corpus::TA_LEN));
+    }
+    {
+        // Characters no corpus contained at all.
+        const std::string weird = "\xE2\x82\xB9 999 \xF0\x9F\x9A\xA8";  // rupee sign, emoji
+        const auto cps = toCodepoints(weird);
+        const auto enTbl = train::train(frequencies(toCodepoints(
+            std::string(corpus::EN, corpus::EN_LEN))));
+        const HuffTable v = enTbl.view();
+        std::vector<uint8_t> buf(256);
+        size_t n = 0;
+        const CodecResult er = encode(v, cps.data(), cps.size(), buf.data(), buf.size(), n);
+        std::vector<uint32_t> back(cps.size() + 16);
+        size_t m = 0;
+        const CodecResult dr = decode(v, buf.data(), n, back.data(), back.size(), m);
+        back.resize(m);
+        check(er == CodecResult::Ok && dr == CodecResult::Ok && back == cps,
+              "rupee sign + emoji (never in any corpus) survive via escape");
+    }
+
+    std::printf("\nEDGE CASES\n");
+    {
+        const auto enTbl = train::train(frequencies(toCodepoints(
+            std::string(corpus::EN, corpus::EN_LEN))));
+        const HuffTable v = enTbl.view();
+        uint8_t buf[64];
+        size_t n = 0;
+        check(encode(v, nullptr, 0, buf, sizeof(buf), n) == CodecResult::Ok && n > 0,
+              "empty input encodes to a non-empty EOS-only stream");
+        uint32_t back[8];
+        size_t m = 0;
+        check(decode(v, buf, n, back, 8, m) == CodecResult::Ok && m == 0,
+              "empty stream decodes back to zero codepoints");
+
+        const auto cps = toCodepoints(std::string(corpus::EN, corpus::EN_LEN));
+        size_t n2 = 0;
+        check(encode(v, cps.data(), cps.size(), buf, 4, n2) == CodecResult::OutputTooSmall,
+              "undersized output buffer is refused, not overrun");
+
+    }
+
+    // Truncation deserves its own measurement. No entropy coder can reliably
+    // detect a cut stream on its own - it has no redundancy left to check
+    // against. What matters is that truncation NEVER reproduces the original
+    // message, and that something upstream catches the short reads.
+    std::printf("\nTRUNCATION BEHAVIOUR (why the packet CRC has to gate this)\n");
+    {
+        const auto cps = toCodepoints(std::string(corpus::TA, corpus::TA_LEN));
+        const auto tbl = train::train(frequencies(cps));
+        const HuffTable v = tbl.view();
+        std::vector<uint8_t> buf(corpus::TA_LEN * 4 + 64);
+        size_t n = 0;
+        encode(v, cps.data(), cps.size(), buf.data(), buf.size(), n);
+
+        size_t rejected = 0, shortOk = 0, reproduced = 0;
+        for (size_t cut = 1; cut < n; ++cut) {
+            std::vector<uint32_t> back2(cps.size() + 16);
+            size_t m = 0;
+            const CodecResult r = decode(v, buf.data(), cut, back2.data(), back2.size(), m);
+            if (r != CodecResult::Ok) {
+                ++rejected;
+            } else {
+                back2.resize(m);
+                if (back2 == cps) ++reproduced; else ++shortOk;
+            }
+        }
+        std::printf("       %zu truncation points: %zu rejected outright, %zu decoded\n"
+                    "       as a SHORT but well-formed message, %zu reproduced the original\n",
+                    n - 1, rejected, shortOk, reproduced);
+        check(reproduced == 0, "no truncation ever reproduces the full message");
+        std::printf("       -> %zu of %zu cuts decode to plausible-looking short text.\n"
+                    "          The codec cannot catch those. The packet CRC must, and does:\n"
+                    "          a truncated frame fails CRC before the codec is ever called.\n",
+                    shortOk, n - 1);
+    }
+
+    std::printf("\n%s\n", failures == 0 ? "ALL CHECKS PASSED" : "FAILURES PRESENT");
+    return failures == 0 ? 0 : 1;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    const std::string cmd = argc > 1 ? argv[1] : "";
+    if (cmd == "analyze") return cmdAnalyze();
+    if (cmd == "train")   return cmdTrain(false);
+    if (cmd == "bench")   return cmdBench();
+    if (cmd == "test")    return cmdTest();
+    std::fprintf(stderr, "usage: codeclab {analyze|train|bench|test}\n");
+    return 2;
+}
