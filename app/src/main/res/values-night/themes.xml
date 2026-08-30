@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.P2PConnect" parent="android:Theme.Material.NoActionBar" />
+</resources>

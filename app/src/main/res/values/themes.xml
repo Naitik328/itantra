@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Base application theme. Compose provides the real colors at runtime; this only styles
+         the window before the first frame. NoActionBar because the UI draws its own top bar. -->
+    <style name="Theme.P2PConnect" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>
