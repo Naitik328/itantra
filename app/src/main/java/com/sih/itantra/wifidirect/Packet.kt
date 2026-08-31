@@ -107,6 +107,72 @@ object Packet {
     }
 
     /**
+     * Split [text] into pieces whose UTF-8 encodings each fit within [maxBytes], so a message too
+     * long for one frame goes out as several. Breaks at whitespace where it can, so the receiver's
+     * TTS speaks whole words and natural fragments rather than syllables cut in half.
+     *
+     * This matters most for scripts like Devanagari, where every character is ~3 UTF-8 bytes and a
+     * single sentence can blow past the 247-byte [MAX_PAYLOAD] the single-byte `len` field allows.
+     * A lone "word" longer than [maxBytes] (a long URL, or a script without spaces) is hard-split
+     * on codepoint boundaries so a frame never carries half a character.
+     */
+    fun splitUtf8(text: String, maxBytes: Int = MAX_PAYLOAD): List<String> {
+        require(maxBytes > 0) { "maxBytes must be positive" }
+        if (text.toByteArray(Charsets.UTF_8).size <= maxBytes) {
+            return if (text.isEmpty()) emptyList() else listOf(text)
+        }
+
+        val chunks = ArrayList<String>()
+        val current = StringBuilder()
+        var currentBytes = 0
+
+        fun flush() {
+            val piece = current.toString().trim()
+            if (piece.isNotEmpty()) chunks.add(piece)
+            current.setLength(0)
+            currentBytes = 0
+        }
+
+        // Each token is a run of non-space plus the whitespace trailing it, so spacing survives.
+        for (token in Regex("\\S+\\s*").findAll(text).map { it.value }) {
+            val tokenBytes = token.toByteArray(Charsets.UTF_8).size
+            if (tokenBytes > maxBytes) {
+                flush()
+                chunks += hardSplit(token, maxBytes)
+                continue
+            }
+            if (currentBytes + tokenBytes > maxBytes) flush()
+            current.append(token)
+            currentBytes += tokenBytes
+        }
+        flush()
+        return chunks
+    }
+
+    /** Split on codepoint boundaries so no frame ever carries a partial UTF-8 character. */
+    private fun hardSplit(text: String, maxBytes: Int): List<String> {
+        val out = ArrayList<String>()
+        val sb = StringBuilder()
+        var bytes = 0
+        var i = 0
+        while (i < text.length) {
+            val cp = text.codePointAt(i)
+            val ch = String(Character.toChars(cp))
+            val chBytes = ch.toByteArray(Charsets.UTF_8).size
+            if (bytes + chBytes > maxBytes && sb.isNotEmpty()) {
+                out.add(sb.toString())
+                sb.setLength(0)
+                bytes = 0
+            }
+            sb.append(ch)
+            bytes += chBytes
+            i += Character.charCount(cp)
+        }
+        if (sb.isNotEmpty()) out.add(sb.toString().trim().ifEmpty { sb.toString() })
+        return out
+    }
+
+    /**
      * CRC-16/CCITT-FALSE: polynomial 0x1021, init 0xFFFF, no input/output reflection, no final
      * XOR. Computed over [length] bytes of [data] starting at [offset].
      */

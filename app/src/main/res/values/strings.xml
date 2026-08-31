@@ -1,3 +1,22 @@
 <resources>
     <string name="app_name">iTantra</string>
+
+    <!-- Foreground service -->
+    <string name="voice_service_title">iTantra is listening</string>
+    <string name="voice_service_text">Microphone open for offline speech relay</string>
+    <string name="voice_service_stop">Stop</string>
+    <string name="voice_service_channel">Voice capture</string>
+    <string name="voice_service_channel_desc">Shown while the microphone is open</string>
+
+    <!-- Microphone permission -->
+    <string name="mic_rationale_title">Microphone access</string>
+    <string name="mic_rationale_body">iTantra turns your speech into text on this phone and sends
+        that text over the radio link. Nothing is recorded to the cloud and nothing leaves the
+        device except the text frame. The microphone is required for the app to do anything at
+        all.</string>
+    <string name="mic_rationale_confirm">Allow microphone</string>
+    <string name="mic_rationale_dismiss">Not now</string>
+    <string name="mic_denied_body">Microphone permission was denied. Enable it in Settings to
+        capture speech.</string>
+    <string name="open_settings">Open settings</string>
 </resources>

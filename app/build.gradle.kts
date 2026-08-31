@@ -66,6 +66,12 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons.extended)
     implementation(libs.androidx.navigation.compose)
+
+    // sherpa-onnx: on-device STT/TTS runtime (ONNX Runtime Mobile + JNI + Kotlin API), shipped
+    // as a prebuilt AAR from the k2-fsa release. Bundles native libs for four ABIs; the
+    // arm64-v8a filter in defaultConfig keeps only ours in the final APK.
+    implementation(files("libs/sherpa-onnx-1.13.6.aar"))
+
     debugImplementation(libs.androidx.ui.tooling)
 
     testImplementation(libs.junit)

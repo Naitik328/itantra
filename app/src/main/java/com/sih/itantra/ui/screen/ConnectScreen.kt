@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -54,15 +55,21 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import com.sih.itantra.audio.VoiceSessionState
 import com.sih.itantra.model.ChatMessage
 import com.sih.itantra.model.ConnectionState
 import com.sih.itantra.model.PeerDevice
 import com.sih.itantra.model.WifiDirectUiState
+import kotlinx.coroutines.flow.StateFlow
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConnectScreen(
     state: WifiDirectUiState,
+    voiceState: VoiceSessionState,
+    voiceLevel: StateFlow<Float>,
+    micGranted: Boolean,
+    voiceActions: VoiceActions,
     onScan: () -> Unit,
     onDisconnect: () -> Unit,
     onPeerClick: (PeerDevice) -> Unit,
@@ -71,7 +78,7 @@ fun ConnectScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Wi-Fi Direct Connect") },
+                title = { Text("iTantra") },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
                     titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -114,85 +121,100 @@ fun ConnectScreen(
             Spacer(Modifier.height(20.dp))
 
             if (state.isConnected) {
-                ConnectedCard(state)
-                Spacer(Modifier.height(12.dp))
-                ChatSection(
-                    state = state,
-                    onSendMessage = onSendMessage,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                )
+                // Everything above the composer scrolls in a single lazy list, so no matter how
+                // tall the connected/voice cards get, the message box below stays pinned on screen
+                // instead of being squeezed out by a collapsing weight.
+                val listState = rememberLazyListState()
+                LaunchedEffect(state.messages.size) {
+                    if (state.messages.isNotEmpty()) {
+                        listState.animateScrollToItem(state.messages.lastIndex)
+                    }
+                }
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    item { ConnectedCard(state) }
+                    item {
+                        VoiceCard(
+                            state = voiceState,
+                            level = voiceLevel,
+                            micGranted = micGranted,
+                            actions = voiceActions,
+                        )
+                    }
+                    item { ChatHeader(state) }
+                    if (state.messages.isEmpty()) {
+                        item { ChatEmptyHint(state) }
+                    } else {
+                        items(state.messages, key = { it.id }) { message -> MessageBubble(message) }
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+                MessageInput(enabled = state.linkReady, onSend = onSendMessage)
             } else {
-                PeerList(state, onPeerClick)
+                // The voice path needs no peer, so it stays usable while disconnected — that is
+                // what makes capture testable on a single handset. One lazy list carries both
+                // the card and the peer rows; nesting a lazy list inside a scrolling column
+                // would be measured with unbounded height and throw.
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    item {
+                        VoiceCard(
+                            state = voiceState,
+                            level = voiceLevel,
+                            micGranted = micGranted,
+                            actions = voiceActions,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    peerSection(state, onPeerClick)
+                }
             }
         }
     }
 }
 
+/** The "Messages" row with the last measured round-trip. Rendered as a list header. */
 @Composable
-private fun ChatSection(
-    state: WifiDirectUiState,
-    onSendMessage: (String) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Column(modifier) {
-        // Headline metric: the most recent measured round-trip.
-        val lastRtt = state.messages.lastOrNull { it.outgoing && it.roundTripMillis != null }?.roundTripMillis
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                "Messages",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                text = if (lastRtt != null) "Last round-trip: $lastRtt ms" else "Round-trip: —",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
+private fun ChatHeader(state: WifiDirectUiState) {
+    val lastRtt = state.messages.lastOrNull { it.outgoing && it.roundTripMillis != null }?.roundTripMillis
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "Messages",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text = if (lastRtt != null) "Last round-trip: $lastRtt ms" else "Round-trip: —",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
 
-        Spacer(Modifier.height(8.dp))
-
-        val listState = rememberLazyListState()
-        LaunchedEffect(state.messages.size) {
-            if (state.messages.isNotEmpty()) {
-                listState.animateScrollToItem(state.messages.lastIndex)
-            }
-        }
-
-        if (state.messages.isEmpty()) {
-            Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                Text(
-                    text = if (state.linkReady) {
-                        "Say hello — messages are encoded to binary before sending."
-                    } else {
-                        "Setting up secure channel…"
-                    },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        } else {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.fillMaxWidth().weight(1f),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                items(state.messages, key = { it.id }) { message ->
-                    MessageBubble(message)
-                }
-            }
-        }
-
-        Spacer(Modifier.height(8.dp))
-
-        MessageInput(enabled = state.linkReady, onSend = onSendMessage)
+/** Placeholder shown in the message list until the first message is sent or received. */
+@Composable
+private fun ChatEmptyHint(state: WifiDirectUiState) {
+    Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) {
+        Text(
+            text = if (state.linkReady) {
+                "Say hello — messages are encoded to binary before sending."
+            } else {
+                "Setting up secure channel…"
+            },
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -360,37 +382,39 @@ private fun InfoRow(label: String, value: String) {
     }
 }
 
-@Composable
-private fun PeerList(state: WifiDirectUiState, onPeerClick: (PeerDevice) -> Unit) {
+private fun LazyListScope.peerSection(
+    state: WifiDirectUiState,
+    onPeerClick: (PeerDevice) -> Unit,
+) {
     if (state.peers.isEmpty()) {
-        EmptyState(state)
+        item { EmptyState(state) }
         return
     }
-    Text(
-        "Nearby devices",
-        style = MaterialTheme.typography.titleSmall,
-        fontWeight = FontWeight.SemiBold,
-        modifier = Modifier.padding(bottom = 8.dp),
-    )
+    item {
+        Text(
+            "Nearby devices",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(bottom = 4.dp),
+        )
+    }
     val clickable = state.connectionState != ConnectionState.CONNECTING &&
         state.connectionState != ConnectionState.DISCONNECTING
-    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(state.peers, key = { it.deviceAddress.ifBlank { it.deviceName } }) { peer ->
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(enabled = clickable) { onPeerClick(peer) },
-            ) {
-                ListItem(
-                    headlineContent = { Text(peer.deviceName) },
-                    supportingContent = { Text(peer.statusLabel) },
-                    leadingContent = {
-                        Icon(Icons.Filled.Devices, contentDescription = null)
-                    },
-                    trailingContent = { Text("Connect") },
-                    colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surface),
-                )
-            }
+    items(state.peers, key = { it.deviceAddress.ifBlank { it.deviceName } }) { peer ->
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(enabled = clickable) { onPeerClick(peer) },
+        ) {
+            ListItem(
+                headlineContent = { Text(peer.deviceName) },
+                supportingContent = { Text(peer.statusLabel) },
+                leadingContent = {
+                    Icon(Icons.Filled.Devices, contentDescription = null)
+                },
+                trailingContent = { Text("Connect") },
+                colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surface),
+            )
         }
     }
 }

@@ -43,6 +43,7 @@
         tools:targetApi="tiramisu" />
 
     <application
+        android:name=".ITantraApp"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -59,6 +60,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Keeps the microphone open while the app is off screen; without a foreground
+             service Android silences background capture outright. -->
+        <service
+            android:name=".service.VoiceSessionService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
     </application>
 
 </manifest>

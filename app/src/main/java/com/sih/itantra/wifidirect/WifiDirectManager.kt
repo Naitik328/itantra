@@ -80,6 +80,28 @@ class WifiDirectManager(private val appContext: Context) {
     /** Monotonic id source for chat messages. */
     private var nextMessageId = 0L
 
+    /**
+     * Notified when a NORMAL or ALERT frame's text arrives, so the app can speak it. Set by the
+     * ViewModel to bridge the transport to the app-scoped [com.sih.itantra.ai.SpeechRelay]; left
+     * null in tests and whenever no voice output is wanted. The receive timestamp lets the relay
+     * measure frame→audio latency from the moment the bytes landed.
+     */
+    var onSpeechReceived: ((text: String, langCode: Int, alert: Boolean, receivedAtNanos: Long) -> Unit)? =
+        null
+
+    /**
+     * Language stamped on outgoing frames' `lang` byte, so the receiver speaks them in the right
+     * voice. Defaults to the one language we ship a voice for; the selector updates it.
+     */
+    var outgoingLanguage: com.sih.itantra.ai.Language = com.sih.itantra.ai.Language.DEFAULT
+
+    /**
+     * Largest text payload put in a single frame before splitting. Wi-Fi Direct can carry the full
+     * [Packet.MAX_PAYLOAD]; the LoRa backend will lower this, since a 247-byte frame at ~250 bps
+     * takes several seconds on air and long sentences must be broken into shorter frames.
+     */
+    var maxPayloadBytes: Int = Packet.MAX_PAYLOAD
+
     /** True once Wi-Fi P2P has reported itself enabled at least once. */
     private var p2pEnabled = false
 
@@ -787,7 +809,7 @@ class WifiDirectManager(private val appContext: Context) {
      * Encode [text] into the binary [Packet] format and send it, timing the encode step. The
      * sent message shows a round-trip time once the peer's ACK returns.
      */
-    fun sendText(text: String) {
+    fun sendText(text: String, alert: Boolean = false) {
         val t = transport ?: return
         if (!_uiState.value.linkReady) {
             updateState { it.copy(statusMessage = "Link not ready yet — one moment.") }
@@ -796,10 +818,21 @@ class WifiDirectManager(private val appContext: Context) {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
 
+        val type = if (alert) Packet.TYPE_ALERT else Packet.TYPE_NORMAL
+        // One frame's text payload can't exceed 247 bytes (the single-byte `len` field), and Hindi
+        // spends ~3 bytes per character, so a normal sentence needs splitting. Each piece goes out
+        // as its own frame and the receiver speaks them in order.
+        for (chunk in Packet.splitUtf8(trimmed, maxPayloadBytes)) {
+            sendFrame(chunk, type, t)
+        }
+    }
+
+    /** Encode and send one already-size-checked chunk, recording it for ACK round-trip timing. */
+    private fun sendFrame(text: String, type: Int, t: MessageTransport) {
         val seq = sendSeq and 0xFF
         val t0 = System.nanoTime()
         val frame = try {
-            Packet.encode(Packet.TYPE_NORMAL, localNodeId, peerNodeId, LANG_DEFAULT, seq, trimmed)
+            Packet.encode(type, localNodeId, peerNodeId, outgoingLanguage.code, seq, text)
         } catch (e: IllegalArgumentException) {
             updateState { it.copy(statusMessage = "Message too long (max ${Packet.MAX_PAYLOAD} bytes).") }
             return
@@ -809,9 +842,9 @@ class WifiDirectManager(private val appContext: Context) {
 
         val message = ChatMessage(
             id = nextMessageId++,
-            text = trimmed,
+            text = text,
             outgoing = true,
-            type = Packet.TYPE_NORMAL,
+            type = type,
             seq = seq,
             frameBytes = frame.size,
             codecMicros = encodeMicros,
@@ -823,7 +856,8 @@ class WifiDirectManager(private val appContext: Context) {
 
     /** Decode a received frame (timing the decode), display it, and ACK NORMAL/ALERT messages. */
     private fun handleIncomingFrame(frame: ByteArray) {
-        val t0 = System.nanoTime()
+        val receivedAtNanos = System.nanoTime()
+        val t0 = receivedAtNanos
         val decoded = Packet.decode(frame)
         val decodeMicros = (System.nanoTime() - t0) / 1000
         if (decoded == null) {
@@ -859,6 +893,16 @@ class WifiDirectManager(private val appContext: Context) {
                     codecMicros = decodeMicros,
                 )
                 updateState { it.copy(messages = it.messages + message) }
+
+                // Speak it. The received text is the STT output for now typed on the far phone;
+                // the relay synthesises it in the frame's language and plays it on the speaker.
+                onSpeechReceived?.invoke(
+                    decoded.text,
+                    decoded.lang,
+                    decoded.type == Packet.TYPE_ALERT,
+                    receivedAtNanos,
+                )
+
                 // ACK it back so the sender can measure the round-trip. Empty payload.
                 val ack = Packet.encode(
                     Packet.TYPE_ACK, localNodeId, decoded.src, LANG_DEFAULT, decoded.seq, "",
