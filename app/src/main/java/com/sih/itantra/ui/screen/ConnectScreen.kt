@@ -1,4 +1,4 @@
-package com.sih.p2pconnect.ui.screen
+package com.sih.itantra.ui.screen
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -54,10 +54,10 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
-import com.sih.p2pconnect.model.ChatMessage
-import com.sih.p2pconnect.model.ConnectionState
-import com.sih.p2pconnect.model.PeerDevice
-import com.sih.p2pconnect.model.WifiDirectUiState
+import com.sih.itantra.model.ChatMessage
+import com.sih.itantra.model.ConnectionState
+import com.sih.itantra.model.PeerDevice
+import com.sih.itantra.model.WifiDirectUiState
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

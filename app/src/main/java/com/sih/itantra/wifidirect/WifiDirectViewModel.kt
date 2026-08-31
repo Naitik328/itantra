@@ -1,9 +1,9 @@
-package com.sih.p2pconnect.wifidirect
+package com.sih.itantra.wifidirect
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
-import com.sih.p2pconnect.model.PeerDevice
-import com.sih.p2pconnect.model.WifiDirectUiState
+import com.sih.itantra.model.PeerDevice
+import com.sih.itantra.model.WifiDirectUiState
 import kotlinx.coroutines.flow.StateFlow
 
 /**

@@ -1,4 +1,4 @@
-package com.sih.p2pconnect.wifidirect
+package com.sih.itantra.wifidirect
 
 import android.Manifest
 import android.annotation.SuppressLint
@@ -16,10 +16,10 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.core.content.getSystemService
-import com.sih.p2pconnect.model.ChatMessage
-import com.sih.p2pconnect.model.ConnectionState
-import com.sih.p2pconnect.model.PeerDevice
-import com.sih.p2pconnect.model.WifiDirectUiState
+import com.sih.itantra.model.ChatMessage
+import com.sih.itantra.model.ConnectionState
+import com.sih.itantra.model.PeerDevice
+import com.sih.itantra.model.WifiDirectUiState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow

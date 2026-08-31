@@ -1,4 +1,4 @@
-package com.sih.p2pconnect
+package com.sih.itantra
 
 import android.content.pm.PackageManager
 import android.os.Bundle
@@ -9,11 +9,11 @@ import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.sih.p2pconnect.ui.screen.ConnectScreen
-import com.sih.p2pconnect.ui.theme.P2PConnectTheme
-import com.sih.p2pconnect.wifidirect.WifiDirectBroadcastReceiver
-import com.sih.p2pconnect.wifidirect.WifiDirectManager
-import com.sih.p2pconnect.wifidirect.WifiDirectViewModel
+import com.sih.itantra.ui.screen.ConnectScreen
+import com.sih.itantra.ui.theme.ITantraTheme
+import com.sih.itantra.wifidirect.WifiDirectBroadcastReceiver
+import com.sih.itantra.wifidirect.WifiDirectManager
+import com.sih.itantra.wifidirect.WifiDirectViewModel
 
 class MainActivity : ComponentActivity() {
 
@@ -33,7 +33,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            P2PConnectTheme {
+            ITantraTheme {
                 val state by viewModel.uiState.collectAsStateWithLifecycle()
                 ConnectScreen(
                     state = state,

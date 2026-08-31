@@ -19,5 +19,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "P2PConnect"
+rootProject.name = "iTantra"
 include(":app")

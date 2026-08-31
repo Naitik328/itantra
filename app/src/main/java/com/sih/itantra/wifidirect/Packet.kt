@@ -1,4 +1,4 @@
-package com.sih.p2pconnect.wifidirect
+package com.sih.itantra.wifidirect
 
 /**
  * Binary wire format for text messages sent over the Wi-Fi Direct link.

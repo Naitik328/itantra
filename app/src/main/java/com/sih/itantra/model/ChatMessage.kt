@@ -1,4 +1,4 @@
-package com.sih.p2pconnect.model
+package com.sih.itantra.model
 
 /**
  * One message in the connected-session chat, in a UI-friendly shape.

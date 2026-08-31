@@ -1,4 +1,4 @@
-package com.sih.p2pconnect.wifidirect
+package com.sih.itantra.wifidirect
 
 import android.util.Log
 import java.io.BufferedInputStream

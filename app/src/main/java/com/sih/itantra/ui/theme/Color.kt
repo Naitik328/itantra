@@ -1,4 +1,4 @@
-package com.sih.p2pconnect.ui.theme
+package com.sih.itantra.ui.theme
 
 import androidx.compose.ui.graphics.Color
 

@@ -1,4 +1,4 @@
-package com.sih.p2pconnect.model
+package com.sih.itantra.model
 
 /**
  * High-level connection lifecycle for the Wi-Fi Direct backend. The UI reacts only to this

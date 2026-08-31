@@ -1,4 +1,4 @@
-package com.sih.p2pconnect.ui.theme
+package com.sih.itantra.ui.theme
 
 import android.app.Activity
 import android.os.Build
@@ -24,7 +24,7 @@ private val LightColors = lightColorScheme(
 )
 
 @Composable
-fun P2PConnectTheme(
+fun ITantraTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     dynamicColor: Boolean = true,
     content: @Composable () -> Unit,

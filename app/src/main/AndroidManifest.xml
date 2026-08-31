@@ -14,6 +14,22 @@
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- Microphone capture for the speech-to-text path. -->
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="true" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Capture and the P2P link must survive the screen going off, so they run in a
+         foreground service. Android 14+ additionally requires the typed permission. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"
+        tools:targetApi="34" />
+    <uses-permission
+        android:name="android.permission.POST_NOTIFICATIONS"
+        tools:targetApi="tiramisu" />
+
     <!-- Pre-Android 13: P2P discovery needs fine location. -->
     <uses-permission
         android:name="android.permission.ACCESS_FINE_LOCATION"
@@ -32,12 +48,12 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.P2PConnect">
+        android:theme="@style/Theme.ITantra">
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
-            android:theme="@style/Theme.P2PConnect">
+            android:theme="@style/Theme.ITantra">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
