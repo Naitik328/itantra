@@ -7,8 +7,9 @@ Fine-tuned Piper (VITS) voice for Hindi, built for iTantra's offline TTS step
 
 | File | Purpose |
 |---|---|
-| `hi_IN-finetune-medium.onnx` | The voice model (graph-optimized, portable — safe on any CPU/architecture, including Android/ARM) |
+| `hi_IN-finetune-medium.onnx` | The voice model (graph-optimized, portable — safe on any CPU/architecture, including Android/ARM). **Patched with sherpa-onnx metadata** (see below) — use this one, not a re-export straight from `piper.train.export_onnx`. |
 | `hi_IN-finetune-medium.onnx.json` | Voice config (phoneme map, sample rate, speaker info) — must sit next to the `.onnx` with a matching basename |
+| `tokens.txt` | Phoneme→id map in sherpa-onnx's plain-text format, generated from the config above. Pass this as sherpa-onnx's `tokens` path. |
 
 ## How it was made
 
@@ -46,6 +47,24 @@ voice = PiperVoice.load("hi_IN-finetune-medium.onnx")
 with wave.open("out.wav", "wb") as wav_file:
     voice.synthesize_wav("नमस्ते, यह मेरी नई हिंदी आवाज़ है।", wav_file)
 ```
+
+## sherpa-onnx compatibility fix (2026-08-31)
+
+A raw `piper.train.export_onnx` output crashes sherpa-onnx's native init:
+
+```
+sherpa-onnx: offline-tts-vits-model.cc:Init:169
+'sample_rate' does not exist in the metadata
+```
+
+sherpa-onnx expects `model_type`, `comment`, `language`, `voice`, `n_speakers`,
+`sample_rate` (and a few others) embedded as ONNX `metadata_props` — these
+aren't written by Piper's own exporter. This model has already been patched
+(script: `add_sherpa_metadata.py`, based on sherpa-onnx's official
+`scripts/piper/add_meta_data.py`) and the matching `tokens.txt` generated. If
+you re-export this voice from a checkpoint for any reason, re-run the patch
+step before shipping it — an unpatched `.onnx` will crash on init exactly like
+above.
 
 ## Known limitations / next steps
 
