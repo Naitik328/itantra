@@ -1,0 +1,21 @@
+# PlatformIO build cache and toolchain (hundreds of MB)
+.pio/
+
+# Editor
+.vscode/
+.idea/
+*.iml
+
+# macOS
+.DS_Store
+
+# Native codec-lab build output
+tools/build/
+
+# Compiled artefacts
+*.o
+*.a
+*.elf
+*.bin
+*.hex
+*.map
