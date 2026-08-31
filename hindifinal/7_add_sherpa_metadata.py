@@ -20,15 +20,27 @@ def load_config(config_path):
 
 
 def generate_tokens(config, out_path):
+    # sherpa-onnx's tokens.txt reader (ReadTokens in piper-phonemize-lexicon.cc)
+    # requires every symbol to be exactly one Unicode codepoint (or the literal
+    # "<BLNK>"); anything else makes it abort with "Error when reading tokens".
+    # Piper's shared 256-symbol vocabulary includes multi-character diphthongs
+    # (e.g. "aɪ") inherited from the English warmstart checkpoint that a given
+    # language's espeak phonemizer never actually produces -- drop those.
     id_map = config["phoneme_id_map"]
+    kept = 0
+    skipped = 0
     with open(out_path, "w", encoding="utf-8") as f:
         for s, i in id_map.items():
             if s == "\n":
                 continue
             if isinstance(i, list):
                 i = i[0]
+            if len(s) != 1 and s != "<BLNK>":
+                skipped += 1
+                continue
             f.write(f"{s} {i}\n")
-    print(f"Generated {out_path}")
+            kept += 1
+    print(f"Generated {out_path} ({kept} tokens, {skipped} multi-char symbols dropped)")
 
 
 def add_meta_data(onnx_path, meta_data):
