@@ -38,7 +38,10 @@ import sherpa_onnx
 import soundfile as sf
 
 NUM_THREADS = 4
-LENGTH_SCALE = 0.85
+LENGTH_SCALE = 0.8  # Bengali's default (1.0) rate is noticeably slower than the
+                     # other languages' baseline (~112 "words"/min on a sample
+                     # sentence, vs Telugu's ~152), so it needs a bigger speed-up
+                     # than the 0.85 used elsewhere to reach a natural pace.
 SPEAKER_ID = 12  # the verified female speaker -- see SPEAKER_ID note above
 
 

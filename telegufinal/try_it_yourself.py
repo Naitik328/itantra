@@ -31,7 +31,10 @@ import sherpa_onnx
 import soundfile as sf
 
 NUM_THREADS = 4
-LENGTH_SCALE = 0.85
+LENGTH_SCALE = 0.9  # Telugu's default (1.0) rate is already brisk (~152 "words"/min
+                     # on a sample sentence, faster than English/Bengali's baseline)
+                     # -- only a light tightening, not the more aggressive 0.85 used
+                     # for the slower-baseline languages.
 
 
 def find_espeak_data():

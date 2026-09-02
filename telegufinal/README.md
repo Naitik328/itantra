@@ -104,7 +104,7 @@ of.
 | `4_export_onnx.py` | Exports the trained checkpoint to ONNX (forces the legacy exporter -- see script docstring) |
 | `5_add_sherpa_metadata.py` | Patches sherpa-onnx's required metadata into the ONNX file + generates `tokens.txt` (drops multi-character phoneme symbols -- 5 dropped here, 161 kept). **Mandatory** -- an unpatched export crashes sherpa-onnx's native init |
 | `6_optimize_onnx.py` | ONNX Runtime graph optimization (`ORT_ENABLE_EXTENDED`). Small win (~7%), safe and portable |
-| `try_it_yourself.py` | Interactive test -- type Telugu text, hear it. Ships with `num_threads=4` and `length_scale=0.85` already set (see Latency below) |
+| `try_it_yourself.py` | Interactive test -- type Telugu text, hear it. Ships with `num_threads=4` and `length_scale=0.9` already set (see Latency below) |
 
 ## Training result
 
@@ -124,9 +124,13 @@ of.
 
 Both are set on the *caller* side, not in the model file -- see
 [`../INTEGRATION.md`](../INTEGRATION.md). `try_it_yourself.py` already ships
-with `num_threads=4` and `length_scale=0.85` baked in (sherpa-onnx's default
-`num_threads=1` measured ~3x slower on this project; `length_scale` **cannot**
-be baked into the ONNX metadata -- verified, sherpa-onnx ignores it there).
+with `num_threads=4` and `length_scale=0.9` baked in. Telugu's default rate
+(`length_scale=1.0`) was measured noticeably brisker than English/Bengali's
+baseline (~152 vs ~112-135 "words"/min on a sample sentence), so it only
+needs a light tightening rather than the more aggressive value used
+elsewhere. sherpa-onnx's default `num_threads=1` measured ~2x slower than 4
+on this model; `length_scale` **cannot** be baked into the ONNX metadata --
+verified, sherpa-onnx ignores it there.
 Do not int8-quantize: measured 3x *slower* on this project
 (`benchmark_results.csv`).
 
