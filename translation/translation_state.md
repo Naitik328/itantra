@@ -479,3 +479,16 @@ Hindi/English STT/TTS already work.
   available in this environment. This is the concrete next step toward
   closing the "needs a real Android device" gap that's been open since
   `OnnxMtAdapter.kt` was first compiled.
+- **2026-09-03** — Added `translation/simulator_setup.md`, a standalone
+  handoff doc for a collaborator setting up on-device MT (± STT/TTS)
+  testing on their own machine — what to read first, which files are
+  already on this branch vs. need transferring/regenerating, and a
+  quick-start command sequence. Extended it with the specific STT/TTS
+  model files needed per language (filenames from `languages.json`/spec
+  §4.3/§8.4, since none of those files or their real STT/TTS adapters
+  exist on this branch) and flagged one thing worth checking, not
+  assuming: this machine's `ai_abhi` checkout had
+  `hi_IN-finetune-medium.onnx` on disk where `languages.json` expects
+  `hi_IN-female-medium.onnx` — possibly just a rename since, but a real
+  model/config mismatch fails silently (CLAUDE.md #4.7), so it's called
+  out rather than glossed over.

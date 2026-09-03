@@ -95,12 +95,46 @@ then `translation/android_smoketest/push_models.sh /path/to/that/dir`.
 ## 5. STT/TTS — not part of this branch at all
 
 If you want STT → MT → TTS all working together (not just the MT-only
-smoke test), you'll need these too. They live outside `translation-mt`:
+smoke test), you'll need these too. **None of this is on `translation-mt`**
+— filenames below are what `translation/config/languages.json` and spec
+§4.3/§8.4 declare; get the actual files from `ai_abhi`/wherever
+Shivanshu/Raj keep them, and verify against their `SHA256SUMS.txt` before
+trusting a filename match (docs/CLAUDE.md §4.6 — a truncated download
+loads cleanly and emits garbage, which looks exactly like a model bug).
+
+| File (per language dir `lang/<code>/stt/` or `tts/`) | Purpose |
+|---|---|
+| `lang/hi/stt/indicconformer_hi.int8.onnx` | Hindi STT model |
+| `lang/hi/stt/tokens.txt` | Hindi STT vocabulary — must come from the *same export* as the model above (CLAUDE.md #4.7) |
+| `lang/hi/tts/hi_IN-female-medium.onnx` | Hindi TTS voice |
+| `lang/hi/tts/hi_IN-female-medium.tokens.txt` | Hindi TTS tokenizer |
+| `lang/en/stt/stt_en_fastconformer_ctc_large.int8.onnx` | English STT model — **8x subsampling, not 4x** (CLAUDE.md's Trap 1) |
+| `lang/en/stt/tokens.txt` | English STT vocabulary |
+| `lang/en/stt/lexicon.txt` | English proper-noun repair list (spec §7.2.1) — English only, editable without re-shipping the model |
+| `lang/en/tts/en_US-hfc_female-medium.onnx` | English TTS voice |
+| `lang/en/tts/en_US-hfc_female-medium.tokens.txt` | English TTS tokenizer |
+| `lang/te/stt/indicconformer_te.int8.onnx` | Telugu STT model — CC-BY-4.0, **attribution is a shipping blocker** (spec §3.3) |
+| `lang/te/stt/tokens.txt` | Telugu STT vocabulary (shared 12-language, 5633 classes — stray non-Telugu glyphs are expected, spec §7.2.2) |
+| `lang/te/tts/te_IN-female-medium.onnx` | Telugu TTS voice |
+| `lang/te/tts/te_IN-female-medium.tokens.txt` | Telugu TTS tokenizer |
+| `lang/bn/tts/bn_BD-google-medium.onnx` | Bengali TTS voice — **16-speaker model, `sid=12` required or you get a male voice with no error** (CLAUDE.md's Trap 2). No `lang/bn/stt/` — Bengali has no STT (spec §3.4) |
+| `lang/bn/tts/bn_BD-google-medium.tokens.txt` | Bengali TTS tokenizer |
+| `shared/espeak-ng-data/` | ~19 MB, shared across all four TTS voices |
+| `<lang>/stt/SHA256SUMS.txt`, `<lang>/tts/SHA256SUMS.txt` | Per-directory integrity check — verify before first use, every time |
+
+**One thing worth checking, not assuming:** at the start of this work, this
+machine's checkout of `ai_abhi` had `models/tts/hi_IN/hi_IN-finetune-medium.onnx`
+on disk — a different filename than `languages.json`'s
+`hi_IN-female-medium.onnx` above. That may just mean the file was renamed
+since, or it may be a real mismatch between config and what's actually
+shipped. Confirm the real filename before wiring `ConfigLoader`'s output
+straight into a file path — CLAUDE.md #4.7 is explicit that a
+model/tokens mismatch fails silently, not loudly.
 
 | What | Where it actually lives |
 |---|---|
 | Real `SttAdapter`/`TtsAdapter` implementations (sherpa-onnx-backed) | Not in `translation-mt`. Per `docs/CLAUDE.md` §9/§12, STT is Shivanshu's area, TTS is Raj's — check `ai_raj`/other branches |
-| STT/TTS model files (`indicconformer_*.onnx`, `*_female-medium.onnx`, etc.) | `models/` at repo root (per `docs/CLAUDE.md` §3 layout) — present on `ai_abhi`, not on `translation-mt` |
+| STT/TTS model files (table above) | `models/` at repo root (per `docs/CLAUDE.md` §3 layout) — present on `ai_abhi`, not on `translation-mt` |
 | The real app UI/transport scaffold | `ai_abhi` (Wi-Fi Direct, wire protocol, screens) — never merged with this MT work |
 
 The standalone `translation/android_smoketest/` harness only proves the MT
