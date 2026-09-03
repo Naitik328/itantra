@@ -1,0 +1,75 @@
+{
+  "languages": {
+    "hi": {
+      "displayName": "हिन्दी",
+      "stt": {
+        "model": "indicconformer_hi.int8.onnx",
+        "tokens": "tokens.txt",
+        "modelType": "nemo_ctc"
+      },
+      "tts": {
+        "model": "hi_IN-female-medium.onnx",
+        "tokens": "hi_IN-female-medium.tokens.txt",
+        "espeakVoice": "hi",
+        "lengthScale": 0.85,
+        "speakerId": null
+      }
+    },
+    "en": {
+      "displayName": "English",
+      "stt": {
+        "model": "stt_en_fastconformer_ctc_large.int8.onnx",
+        "tokens": "tokens.txt",
+        "modelType": "nemo_ctc",
+        "lexicon": "lexicon.txt"
+      },
+      "tts": {
+        "model": "en_US-hfc_female-medium.onnx",
+        "tokens": "en_US-hfc_female-medium.tokens.txt",
+        "espeakVoice": "en-us",
+        "lengthScale": 0.85,
+        "speakerId": null
+      }
+    },
+    "te": {
+      "displayName": "తెలుగు",
+      "stt": {
+        "model": "indicconformer_te.int8.onnx",
+        "tokens": "tokens.txt",
+        "modelType": "nemo_ctc"
+      },
+      "tts": {
+        "model": "te_IN-female-medium.onnx",
+        "tokens": "te_IN-female-medium.tokens.txt",
+        "espeakVoice": "te",
+        "lengthScale": 0.9,
+        "speakerId": null
+      }
+    },
+    "bn": {
+      "displayName": "বাংলা",
+      "stt": null,
+      "tts": {
+        "model": "bn_BD-google-medium.onnx",
+        "tokens": "bn_BD-google-medium.tokens.txt",
+        "espeakVoice": "bn",
+        "lengthScale": 0.8,
+        "speakerId": 12
+      }
+    }
+  },
+  "shared": {
+    "espeakDataDir": "espeak-ng-data",
+    "numThreads": 4,
+    "sttSampleRate": 16000
+  },
+  "mt": {
+    "modelDir": "mt",
+    "maxNewTokens": 128,
+    "idleTimeoutMillis": 30000,
+    "directions": {
+      "en-indic": { "targets": ["hi", "te", "bn"] },
+      "indic-en": { "sources": ["hi", "te"] }
+    }
+  }
+}

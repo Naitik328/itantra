@@ -13,7 +13,8 @@ translation module — don't let it drift from what's actually in
 | Export tooling (Python) | Built, **run for real against real weights**, verified |
 | Preprocessing (`IndicProcessor.kt` + support files) | Ported faithfully, **compiled + runtime smoke-tested** |
 | Adapter (`OnnxMtAdapter.kt`) | Matches the verified design, **compiled + smoke-tested (pure-logic paths only — see below)** |
-| Android wiring (Gradle deps, `languages.json`, orchestrator) | Not started |
+| `languages.json` + `ConfigLoader`/`Orchestrator` | **Built, compiled, smoke-tested** — pivot routing verified against real config |
+| Android Gradle module (real app, real dependencies) | Not started |
 | On-device validation | Not started |
 
 ---
@@ -253,6 +254,56 @@ device/emulator. `translation/kotlin_verify/verify.sh` is reproducible
 from a clean cache and worth re-running after any future change to these
 files.
 
+### `languages.json` + `ConfigLoader` + `Orchestrator` (2026-09-03)
+
+Wired MT into config and a real orchestrator, per spec §5.1-§5.4 and
+CLAUDE.md's repo layout:
+
+- `translation/config/languages.json` — the spec §4.3 schema, copied
+  verbatim, plus one addition: an `"mt"` block (`modelDir`, `maxNewTokens`,
+  `idleTimeoutMillis`, and a `directions` map documenting which languages
+  each checkpoint direction covers — descriptive, not load-bearing;
+  `OnnxMtAdapter` validates against the real `vocab_ids.json` at runtime
+  regardless). Final home: `android/app/src/main/assets/config/languages.json`.
+- `com/itantra/config/LanguageConfig.kt` + `ConfigLoader.kt` — data classes
+  and `org.json`-based parsing for the schema above. Handles `stt: null`
+  (Bengali) without crashing, per CLAUDE.md #5 Phase 1 task 1's explicit
+  requirement.
+- `com/itantra/adapters/SttAdapter.kt` + `TtsAdapter.kt` — spec §7.1's
+  interfaces, copied verbatim. Interface only; real sherpa-onnx-backed
+  implementations are Shivanshu's/Raj's areas (spec §12) and don't exist
+  on this branch. Defined so `Orchestrator` compiles against the real
+  contract instead of a guess.
+- `com/itantra/orchestrator/Punctuation.kt` — spec §5.5's "minimum viable
+  approach" (append a full stop per STT output) — this specific piece is
+  unblocked; the model-based alternative stays D5-blocked and unbuilt.
+- `com/itantra/orchestrator/Orchestrator.kt` — sequences the send path
+  (STT → punctuate → `MtAdapter.translate(text, senderLang, "en")`) and
+  receive path (same-language shortcut → reuse original, avoiding the
+  lossy round trip; else `MtAdapter.translate(pivotText, "en", receiverLang)`),
+  per spec §5.3/§5.4 exactly. Constructs `OnnxMtAdapter` directly from
+  `LanguagesConfig.mt` + `filesDir` — this is the actual "wire MT into
+  config and the orchestrator" work. STT/TTS adapters are constructor-
+  injected (interfaces only exist here, see above); a caller with real
+  ones wires them in. Fails loudly (not silently) if asked to send from a
+  language with no STT adapter — e.g. Bengali, spec #3.4.
+
+**Compiled and smoke-tested against real `languages.json`, not a
+fixture.** `translation/kotlin_verify/OrchestratorSmokeTest.kt` (added
+alongside `SmokeTest.kt`, both run by `verify.sh`) parses the actual
+shipped config file and drives `Orchestrator` with fake STT/TTS/MT
+adapters, asserting on exactly what gets called: punctuation is added
+before translation, the same-language receive path makes zero MT calls,
+a cross-language receive correctly pivots through English, TTS returns
+null (not a crash) for an unwired language, and sending from Bengali
+throws instead of silently doing something wrong. All 15 checks pass.
+
+Same real gap as `OnnxMtAdapter` itself: the `MtAdapter` used in these
+tests is a fake (`RecordingMtAdapter`) — the actual ONNX inference path
+still needs a real Android device. What's verified here is the
+*orchestration logic* (routing, config parsing, fail-loud behavior), which
+is real and independent of that gap.
+
 ---
 
 ## What's left
@@ -266,12 +317,16 @@ files.
    raw model output did run and looked structurally right (Devanagari-
    pivoted, as expected pre-transliteration), but neither has a curated
    test file or a full `verify_tokenizer_ids()` pass yet.
-3. **Wire into `languages.json`** (spec §4.3) and the eventual
-   `Orchestrator`/`ModelLifecycle` — `ModelLifecycle` is blocked on D3
-   (docs/CLAUDE.md §2).
-4. **Punctuation restoration** before MT — STT emits none, IndicTrans2
-   expects it. Blocked on D5; naive full-stop is the documented fallback
-   (spec §5.5).
+3. **`ModelLifecycle`** (spec §6.2 full tiered residency across STT/MT/TTS,
+   not just `OnnxMtAdapter`'s own `evictIdle()`) — blocked on D3
+   (docs/CLAUDE.md §2). `Orchestrator.evictIdleModels()` forwards to what
+   `OnnxMtAdapter` already does for itself; a real `ModelLifecycle` that
+   also manages STT/TTS residency is separate, unbuilt work.
+4. **Real `SttAdapter`/`TtsAdapter` implementations** — only interfaces
+   exist here (spec §7.1, copied verbatim). The real sherpa-onnx-backed
+   ones are Shivanshu's/Raj's areas and live outside this branch; wiring
+   them into `Orchestrator`'s constructor is what turns the smoke-tested
+   fake-adapter pipeline into a real one.
 5. **On-device validation.** Everything above ran on a desktop CPU with
    full RAM. Real phone RTF/RAM is still unmeasured — that's D3's whole
    point (spec §3.2).
@@ -344,3 +399,13 @@ Hindi/English STT/TTS already work.
   Real gap still open: `OnnxMtAdapter`'s actual ONNX session calls need a
   real Android device (`onnxruntime-extensions`' native lib is
   Android-only, no desktop-Linux build to test against here).
+- **2026-09-03** — Wired MT into config and an orchestrator:
+  `translation/config/languages.json` (spec §4.3 schema + a new `mt`
+  block), `ConfigLoader`/`LanguageConfig.kt`, `SttAdapter`/`TtsAdapter`
+  interfaces (spec §7.1, verbatim), `Punctuation.kt` (spec §5.5 minimum
+  viable), and `Orchestrator.kt` sequencing the send/receive pivot paths
+  (spec §5.3/§5.4) and constructing `OnnxMtAdapter` directly from config.
+  Compiled clean; `OrchestratorSmokeTest.kt` parses the real shipped
+  `languages.json` and drives the full pivot-routing logic with fake
+  adapters — all 15 checks pass, including the same-language shortcut
+  making zero MT calls and a Bengali send failing loudly (no STT).

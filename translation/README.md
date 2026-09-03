@@ -26,6 +26,10 @@ libraries cover.
 | `MtAdapter.kt` | the adapter interface (spec #7.1) |
 | `OnnxMtAdapter.kt` | the MT adapter: in-graph tokenization, session lifecycle (spec #6.2/#6.3/#6.4), pivot-only routing, KV-cache-free greedy decode loop |
 | `kotlin_verify/SmokeTest.kt`, `kotlin_verify/verify.sh` | standalone compile + runtime check against real dependency jars — see "Compiled and smoke-tested" below |
+| `../config/languages.json`, `com/itantra/config/LanguageConfig.kt`, `ConfigLoader.kt` | spec #4.3 schema + an `mt` block, and its parser |
+| `com/itantra/adapters/SttAdapter.kt`, `TtsAdapter.kt` | spec #7.1 interfaces, verbatim — no implementation on this branch |
+| `com/itantra/orchestrator/Punctuation.kt`, `Orchestrator.kt` | spec §5.5 naive punctuation + §5.3/§5.4 send/receive pivot sequencing, wired to `OnnxMtAdapter` |
+| `kotlin_verify/OrchestratorSmokeTest.kt` | drives `Orchestrator` with fake adapters against the real shipped `languages.json` |
 
 ## Tokenization: resolved, in-graph, not in Kotlin — and verified end-to-end
 
@@ -158,3 +162,10 @@ docs/CLAUDE.md's repo layout (§3) doesn't list a preprocessing package
 explicitly, but by function this sits next to the future MT adapter:
 `android/app/src/main/kotlin/com/itantra/adapters/mt/` (package
 `com.itantra.mt`, unchanged). Move the files, don't rewrite them.
+
+The newer additions map onto CLAUDE.md §3's layout exactly, since they
+were written to match it:
+- `com/itantra/config/*.kt` → `android/app/src/main/kotlin/com/itantra/config/`
+- `com/itantra/adapters/*.kt` → `android/app/src/main/kotlin/com/itantra/adapters/`
+- `com/itantra/orchestrator/*.kt` → `android/app/src/main/kotlin/com/itantra/orchestrator/`
+- `translation/config/languages.json` → `android/app/src/main/assets/config/languages.json`

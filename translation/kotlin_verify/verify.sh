@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Compiles translation/kotlin/com/itantra/mt/*.kt against the REAL
-# dependency jars (not stubs) and runs SmokeTest.kt against the result.
-# No Gradle/Android module exists on this branch yet, so this is a
-# standalone verification path -- see translation/translation_state.md.
+# Compiles translation/kotlin/com/itantra/{mt,config,adapters,orchestrator}/*.kt
+# against the REAL dependency jars (not stubs) and runs the smoke tests
+# against the result. No Gradle/Android module exists on this branch yet,
+# so this is a standalone verification path -- see
+# translation/translation_state.md.
 #
 # Downloads (first run only, cached under --cache-dir) real artifacts:
 #   - kotlin-compiler (JetBrains GitHub release)
@@ -28,7 +29,8 @@ ORG_JSON_VERSION=20240303
 KOTLINC="$CACHE_DIR/kotlinc/bin/kotlinc"
 LIBS="$CACHE_DIR/libs"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC_DIR="$SCRIPT_DIR/../kotlin/com/itantra/mt"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+KT_ROOT="$REPO_ROOT/translation/kotlin/com/itantra"
 BUILD_DIR="$(mktemp -d)"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
@@ -67,12 +69,19 @@ fi
 CP="$LIBS/onnxruntime.jar:$LIBS/json.jar:$LIBS/onnxruntime-extensions.jar"
 
 echo ""
-echo "Compiling translation/kotlin/com/itantra/mt/*.kt + SmokeTest.kt ..."
+echo "Compiling mt/, config/, adapters/, orchestrator/ + smoke tests ..."
 "$KOTLINC" -classpath "$CP" -jvm-target 1.8 -d "$BUILD_DIR/classes" \
-  "$SRC_DIR"/*.kt "$SCRIPT_DIR/SmokeTest.kt"
+  "$KT_ROOT"/mt/*.kt "$KT_ROOT"/config/*.kt "$KT_ROOT"/adapters/*.kt "$KT_ROOT"/orchestrator/*.kt \
+  "$SCRIPT_DIR"/SmokeTest.kt "$SCRIPT_DIR"/OrchestratorSmokeTest.kt
 echo "Compile OK."
 
 KOTLIN_STDLIB="$(find "$CACHE_DIR/kotlinc/lib" -name 'kotlin-stdlib.jar')"
+RUN_CP="$BUILD_DIR/classes:$CP:$KOTLIN_STDLIB"
+
 echo ""
-echo "Running SmokeTest ..."
-java -classpath "$BUILD_DIR/classes:$CP:$KOTLIN_STDLIB" SmokeTestKt
+echo "Running SmokeTest (IndicProcessor / preprocessing) ..."
+(cd "$REPO_ROOT" && java -classpath "$RUN_CP" SmokeTestKt)
+
+echo ""
+echo "Running OrchestratorSmokeTest (languages.json + pivot routing) ..."
+(cd "$REPO_ROOT" && java -classpath "$RUN_CP" OrchestratorSmokeTestKt)
