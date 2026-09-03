@@ -345,27 +345,40 @@ a clean `verify_tokenizer_ids()` pass against real weights.**
 
 ## What's left
 
-1. **Full on-device inference test.** Compilation and pure-logic behavior
-   are verified (see above); `OnnxMtAdapter`'s actual ONNX session calls
-   (encoder/decoder/tokenizer custom-op) still need a real Android
-   device/emulator to exercise — the biggest remaining untested surface.
+1. **Run the on-device smoke test.** `translation/android_smoketest/` is
+   built (Gradle module, instrumented test, push script) but not run — no
+   Android SDK/emulator/device was available in the environment it was
+   written in. This is the single biggest remaining untested surface:
+   `OnnxMtAdapter`'s actual ONNX session calls (encoder/decoder/tokenizer
+   custom-op), never exercised through a real Android native library.
 2. ~~Export `te`/`bn` the same way~~ — **done, see below.** All five
    language pairs the app actually uses (hi↔en, te↔en, en→bn) now have
    curated test files and a clean `verify_tokenizer_ids()` pass.
-3. **`ModelLifecycle`** (spec §6.2 full tiered residency across STT/MT/TTS,
+3. **Merge into the real app module.** This branch (`translation-mt`)
+   deliberately never had an `app/` — the real UI/transport scaffold
+   (Wi-Fi Direct, wire protocol, screens) lives on `ai_abhi`/`ai_raj` and
+   was never merged with this MT work. `translation/android_smoketest/`
+   is a deliberately separate, minimal harness for exactly this reason —
+   it answers "does the MT module run on Android" without waiting on a
+   branch merge. The real integration (this code moving into
+   `android/app/src/main/kotlin/com/itantra/...` per each file's own "where
+   this belongs" note, `ModelStore` download wiring, D1) is still ahead.
+4. **`ModelLifecycle`** (spec §6.2 full tiered residency across STT/MT/TTS,
    not just `OnnxMtAdapter`'s own `evictIdle()`) — blocked on D3
    (docs/CLAUDE.md §2). `Orchestrator.evictIdleModels()` forwards to what
    `OnnxMtAdapter` already does for itself; a real `ModelLifecycle` that
    also manages STT/TTS residency is separate, unbuilt work.
-4. **Real `SttAdapter`/`TtsAdapter` implementations** — only interfaces
+5. **Real `SttAdapter`/`TtsAdapter` implementations** — only interfaces
    exist here (spec §7.1, copied verbatim). The real sherpa-onnx-backed
    ones are Shivanshu's/Raj's areas and live outside this branch; wiring
    them into `Orchestrator`'s constructor is what turns the smoke-tested
    fake-adapter pipeline into a real one.
-5. **On-device validation.** Everything above ran on a desktop CPU with
-   full RAM. Real phone RTF/RAM is still unmeasured — that's D3's whole
-   point (spec §3.2).
-6. **Feed the real MT sizes back to the team** for the D1 packaging
+6. **Real-device performance measurement** (RTF/RAM, spec §3.2, D3) —
+   distinct from item 1's correctness check: even once the smoke test
+   passes, everything so far has only run on a desktop CPU with full RAM.
+   Real phone RTF/RAM is still unmeasured — that's D3's whole point, and
+   the actual blocker on §6.2's tiered-residency decision.
+7. **Feed the real MT sizes back to the team** for the D1 packaging
    decision (spec §2.1/§2.3) — this doc has the numbers; the spec file
    itself needs team sign-off to edit.
 
@@ -453,3 +466,16 @@ Hindi/English STT/TTS already work.
   clean `verify_tokenizer_ids()` + real-translation pass — en→te and
   en→bn produced exact matches to hand-written Telugu/Bengali references,
   and te→en round-tripped back to the original English exactly.
+- **2026-09-03** — Moved the exported model bundles off `/tmp` to
+  `~/itantra-mt-export/` on the machine this was built on (2.1 GB;
+  regenerating means re-running the full HF-authenticated export). Built
+  `translation/android_smoketest/` — a standalone, minimal Gradle Android
+  module (not the real app) with `onnxruntime-android` +
+  `onnxruntime-extensions-android` as real dependencies, sourcing directly
+  from `translation/kotlin/` (no copy), an instrumented test that
+  constructs a real `OnnxMtAdapter` and checks the same sentences already
+  verified on desktop, and `push_models.sh` to get the shipped bundle onto
+  a device. **Built, not run** — no Android SDK/emulator/device was
+  available in this environment. This is the concrete next step toward
+  closing the "needs a real Android device" gap that's been open since
+  `OnnxMtAdapter.kt` was first compiled.
