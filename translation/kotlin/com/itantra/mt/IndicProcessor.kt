@@ -30,14 +30,6 @@ package com.itantra.mt
  */
 object IndicProcessor {
 
-    /** FLORES-200 tag -> this project's internal ISO code (spec #4.1 tags). */
-    private val FLORES_TO_ISO = mapOf(
-        "eng_Latn" to "en",
-        "hin_Deva" to "hi",
-        "tel_Telu" to "te",
-        "ben_Beng" to "bn",
-    )
-
     data class PreprocessResult(val text: String, val placeholders: Map<String, String>)
 
     /**
@@ -49,8 +41,7 @@ object IndicProcessor {
      *   normal inference calls should leave this false.
      */
     fun preprocess(text: String, srcLangTag: String, tgtLangTag: String, isTarget: Boolean = false): PreprocessResult {
-        val isoLang = FLORES_TO_ISO[srcLangTag]
-            ?: error("No FLORES tag configured for '$srcLangTag'. Add it to IndicProcessor.FLORES_TO_ISO -- don't guess one.")
+        val isoLang = FloresTags.iso(srcLangTag)
 
         var sent = puncNorm(text)
         val digitsNormalized = DigitNormalizer.normalize(sent)
@@ -72,8 +63,7 @@ object IndicProcessor {
     }
 
     fun postprocess(modelOutput: String, tgtLangTag: String, placeholders: Map<String, String>): String {
-        val isoLang = FLORES_TO_ISO[tgtLangTag]
-            ?: error("No FLORES tag configured for '$tgtLangTag'. Add it to IndicProcessor.FLORES_TO_ISO -- don't guess one.")
+        val isoLang = FloresTags.iso(tgtLangTag)
 
         var sent = modelOutput
         sent = Placeholders.restore(sent, placeholders)
