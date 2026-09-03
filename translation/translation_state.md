@@ -91,7 +91,7 @@ Also: detokenizing needs no SentencePiece decoder at all —
 custom-op design — one fewer thing that can silently disagree with the
 real tokenizer.
 
-### Package size — investigated 2026-09-03, ~50% cut found, more possible
+### Package size — investigated and decided, 2026-09-03: ~436 MB, accepted
 
 The user asked whether the whole package could fit a ~300 MB budget.
 Measured the real int8 files by initializer size (not guessed) and found
@@ -171,34 +171,35 @@ really per-language-prunable (it's shared Devanagari infrastructure any
 Indic language needs). **~436 MB is close to the practical floor** for
 en+hi+te+bn without sacrificing quality or dropping a language.
 
-Remaining real levers, roughly ordered by effort:
+Levers considered, roughly ordered by effort:
 
 1. ~~Vocabulary pruning by target language~~ — **invalidated by the
    measurement above.** Not viable as originally conceived.
-2. **Frequency-based pruning**: run real Hindi/Telugu/Bengali corpora
-   through the tokenizer, keep only Devanagari pieces that actually get
-   used, drop genuinely-unused ones (this vocab covers many Devanagari-
-   script relatives too — Marathi, Nepali, Sanskrit, Bhojpuri, etc. — some
-   of which this app never needs). Different in kind from the Gather-
-   quantization fix: uncertain savings until measured against a real
-   corpus (none available in this environment), and real quality risk —
-   words outside the sample corpus become OOV. Not attempted.
-3. **Even more aggressive quantization** (int4, or static/calibrated
-   instead of dynamic) — smaller effort than #2 but higher quality risk;
-   would need its own accuracy validation.
-4. **Scope tradeoff** — drop a language from MT support entirely (not
-   just from a "split package" — that doesn't help, see above). A real
-   product decision, not a technical one.
-5. **Accept ~436 MB for MT** and revisit the *overall* app budget instead
-   — spec's own §2.2 already put Hindi+English STT/TTS alone at ~477 MB
-   before MT, so a whole-app 300 MB target was already off the table
-   before this investigation; worth clarifying with the team whether the
-   300 MB budget was ever meant for MT alone or the whole first-launch
-   package.
+2. ~~Restrict each install to one Indic language~~ — **also considered
+   and rejected.** Asked directly whether limiting a single device to
+   only its own language (e.g. a Telugu phone never touching Hindi)
+   would shrink its package. It would not: the model's vocab/weights
+   aren't organized per-language (see above), so a Telugu-only install
+   still needs essentially the full ~436 MB.
+3. Frequency-based pruning (real corpora, uncertain savings, real
+   quality risk), more aggressive quantization (int4/static), and
+   dropping a language from scope entirely were also on the table —
+   deferred, not needed given the decision below.
 
-Not implemented yet — presented as findings + options. #2/#3 need real
-corpora/accuracy work this environment can't do blind, and #4/#5 are
-product/scope calls, not calls to make unilaterally.
+#### DECISION (2026-09-03): accept ~436 MB, both directions, full en/hi/te/bn support
+
+Discussed the remaining options (frequency pruning, int4, per-language
+restriction, dropping a language) and the team decided **not** to pursue
+further size cuts right now — the practical floor is ~436 MB for the
+model itself, and closing the gap to 300 MB would mean either real
+quality risk (untested corpus-based pruning, int4) or a product scope cut
+(dropping a language), neither of which is worth it just to hit a number
+that was never confirmed to apply to MT specifically rather than the
+whole app (spec §2.2 already put Hindi+English STT/TTS alone at ~477 MB
+before MT even enters the picture). **~436 MB is the accepted MT package
+size going forward.** Revisit only if real on-device constraints (D3,
+still unmeasured) force the question, or if a genuinely low-risk lever
+turns up later.
 
 ### Preprocessing (`translation/kotlin/com/itantra/mt/`)
 
@@ -235,21 +236,16 @@ src→en→tgt.
    raw model output did run and looked structurally right (Devanagari-
    pivoted, as expected pre-transliteration), but neither has a curated
    test file or a full `verify_tokenizer_ids()` pass yet.
-3. **Decide on the package-size options above** (frequency-based pruning
-   vs. int4 vs. scope tradeoff vs. accepting ~436 MB) — per-target-language
-   vocab pruning and per-language split packages are both ruled out (see
-   "Package size" section); needed before this is "done" for packaging
-   purposes, not just technically working.
-4. **Wire into `languages.json`** (spec §4.3) and the eventual
+3. **Wire into `languages.json`** (spec §4.3) and the eventual
    `Orchestrator`/`ModelLifecycle` — `ModelLifecycle` is blocked on D3
    (docs/CLAUDE.md §2).
-5. **Punctuation restoration** before MT — STT emits none, IndicTrans2
+4. **Punctuation restoration** before MT — STT emits none, IndicTrans2
    expects it. Blocked on D5; naive full-stop is the documented fallback
    (spec §5.5).
-6. **On-device validation.** Everything above ran on a desktop CPU with
+5. **On-device validation.** Everything above ran on a desktop CPU with
    full RAM. Real phone RTF/RAM is still unmeasured — that's D3's whole
    point (spec §3.2).
-7. **Feed the real MT sizes back to the team** for the D1 packaging
+6. **Feed the real MT sizes back to the team** for the D1 packaging
    decision (spec §2.1/§2.3) — this doc has the numbers; the spec file
    itself needs team sign-off to edit.
 
@@ -300,3 +296,9 @@ Hindi/English STT/TTS already work.
   close to the practical floor; frequency-based corpus pruning is the
   only remaining lever with real (if uncertain) upside, and needs real
   Hindi/Telugu/Bengali corpora this environment doesn't have.
+- **2026-09-03** — Also asked and ruled out: restricting a single
+  install to one Indic language (e.g. Telugu-only phones). Doesn't
+  shrink anything, same reason as the split-package finding above.
+  **Decision: accept ~436 MB as the MT package size** rather than chase
+  further cuts that all require either real quality risk or a product
+  scope cut. Revisit only if on-device measurement (D3) forces it.
