@@ -40,6 +40,50 @@ def flores_tag(lang: str) -> str:
         )
 
 
+# Unicode block starts for the Brahmi-derived scripts this project ships --
+# same constants as translation/kotlin/com/itantra/mt/IndicScripts.kt, ported
+# from indic_nlp_library's langinfo.py (Anoop Kunchukuttan, MIT licensed).
+SCRIPT_RANGES = {
+    "hi": 0x0900,
+    "bn": 0x0980,
+    "te": 0x0C00,
+}
+COORDINATED_RANGE_START = 0x00
+COORDINATED_RANGE_END = 0x6F
+DANDA = 0x0964
+DOUBLE_DANDA = 0x0965
+
+
+def transliterate(text: str, src_lang: str, tgt_lang: str) -> str:
+    """Offset-based script transliteration -- same algorithm as
+    UnicodeIndicTransliterator.kt, ported from indic_nlp_library.
+
+    Why this matters here, not just in the Kotlin app: IndicTrans2's own
+    preprocessing (processor.pyx) transliterates every Indic-script sentence
+    to a Devanagari pivot before tokenization, and transliterates the
+    model's Devanagari output back to the target script afterward. The
+    tokenizer vocab is 61.5% Devanagari and only ~0.1% Telugu/Bengali
+    (measured, see translation/translation_state.md's "Package size"
+    section) -- skipping this step doesn't just look different, it feeds
+    the model text its vocabulary can barely represent. Any verify script
+    that calls the tokenizer on raw native-script Telugu/Bengali text
+    without this step first is testing something the real pipeline never
+    does, and any surprising result would be an artifact of that gap, not
+    a fact about the model.
+    """
+    if src_lang not in SCRIPT_RANGES or tgt_lang not in SCRIPT_RANGES:
+        return text
+    src_base = SCRIPT_RANGES[src_lang]
+    tgt_base = SCRIPT_RANGES[tgt_lang]
+    out = []
+    for ch in text:
+        offset = ord(ch) - src_base
+        in_range = COORDINATED_RANGE_START <= offset <= COORDINATED_RANGE_END
+        is_danda = ord(ch) in (DANDA, DOUBLE_DANDA)
+        out.append(chr(tgt_base + offset) if in_range and not is_danda else ch)
+    return "".join(out)
+
+
 @dataclass
 class LoadedModel:
     model: "object"
@@ -126,12 +170,16 @@ def greedy_decode_onnx(
     src_tag = flores_tag(src_lang)
     tgt_tag = flores_tag(tgt_lang)
 
+    # Devanagari-pivot transliteration for te/bn -- see transliterate()'s
+    # doc. No-op for hi (already Devanagari) and en (not an Indic script).
+    pivoted_text = transliterate(text, src_lang, "hi")
+
     # Both tags prepended to the SOURCE text, matching IndicProcessor's real
     # preprocessing (processor.pyx's _preprocess: f"{src_lang} {tgt_lang}
     # {processed_sent}") -- not just the source tag. This was wrong in an
     # earlier version of this function; caught while wiring up the in-graph
     # tokenizer path in tools/tokenizer_graph.py, which reuses this format.
-    src_text = f"{src_tag} {tgt_tag} {text}"
+    src_text = f"{src_tag} {tgt_tag} {pivoted_text}"
     enc = tokenizer(src_text, return_tensors="np")
     input_ids = enc["input_ids"].astype(np.int64)
     attention_mask = enc["attention_mask"].astype(np.int64)
@@ -167,7 +215,8 @@ def greedy_decode_onnx(
         if eos_id is not None and next_id == eos_id:
             break
 
-    return tokenizer.decode(decoder_input_ids[0], skip_special_tokens=True)
+    decoded = tokenizer.decode(decoder_input_ids[0], skip_special_tokens=True)
+    return transliterate(decoded, "hi", tgt_lang)  # Devanagari pivot -> target script; no-op for hi/en
 
 
 def model_size_mb(path: Path) -> float:

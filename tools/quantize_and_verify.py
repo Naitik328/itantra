@@ -34,6 +34,7 @@ from indictrans_common import (
     greedy_decode_onnx,
     load_model_and_tokenizer,
     model_size_mb,
+    transliterate,
 )
 
 
@@ -125,10 +126,14 @@ def verify_tokenizer_ids(out_dir: Path, tokenizer, src_lang: str, tgt_lang: str,
     pairs = load_test_pairs(test_file)
     print(f"\nVerifying in-graph tokenizer ids against the real HF tokenizer ({len(pairs)} sentences)...")
     for src, _ref in pairs:
+        # Devanagari-pivot transliteration for te/bn source text -- see
+        # indictrans_common.py's transliterate() doc. No-op for hi/en.
+        pivoted_src = transliterate(src, src_lang, "hi")
+
         graph_ids, _attn = session.run(
             None,
             {
-                "raw_text": np.array([src], dtype=object),
+                "raw_text": np.array([pivoted_src], dtype=object),
                 "src_tag_id": np.array([src_tag_id], dtype=np.int64),
                 "tgt_tag_id": np.array([tgt_tag_id], dtype=np.int64),
                 "eos_id_const": np.array([eos_id], dtype=np.int64),
@@ -138,7 +143,7 @@ def verify_tokenizer_ids(out_dir: Path, tokenizer, src_lang: str, tgt_lang: str,
 
         # Both tags, matching IndicProcessor's real preprocessing format
         # (processor.pyx's _preprocess) -- see indictrans_common.py's note.
-        full_text = f"{src_tag} {tgt_tag} {src}"
+        full_text = f"{src_tag} {tgt_tag} {pivoted_src}"
         expected_ids = tokenizer(full_text, return_tensors="np")["input_ids"][0].tolist()
 
         if graph_ids != expected_ids:
@@ -234,6 +239,10 @@ def greedy_decode_onnx_embedded(out_dir: Path, decoder_session, text: str, src_l
     eos_id = vocab_ids["eos_id"]
     decoder_start_id = vocab_ids["decoder_start_id"]
 
+    # Devanagari-pivot transliteration for te/bn source text -- see
+    # indictrans_common.py's transliterate() doc. No-op for hi/en.
+    pivoted_text = transliterate(text, src_lang, "hi")
+
     # The merged encoder.onnx only exposes encoder_hidden_states --
     # attention_mask was consumed internally by io_map during merge_models()
     # and is no longer a graph output (confirmed empirically: onnx.compose
@@ -243,7 +252,7 @@ def greedy_decode_onnx_embedded(out_dir: Path, decoder_session, text: str, src_l
     (encoder_hidden_states,) = encoder_session.run(
         None,
         {
-            "raw_text": np.array([text], dtype=object),
+            "raw_text": np.array([pivoted_text], dtype=object),
             "src_tag_id": np.array([src_tag_id], dtype=np.int64),
             "tgt_tag_id": np.array([tgt_tag_id], dtype=np.int64),
             "eos_id_const": np.array([eos_id], dtype=np.int64),
@@ -268,7 +277,8 @@ def greedy_decode_onnx_embedded(out_dir: Path, decoder_session, text: str, src_l
         if next_id == eos_id:
             break
 
-    return detokenize(tgt_vocab, decoder_input_ids[0].tolist(), eos_id)
+    decoded = detokenize(tgt_vocab, decoder_input_ids[0].tolist(), eos_id)
+    return transliterate(decoded, "hi", tgt_lang)  # Devanagari pivot -> target script; no-op for hi/en
 
 
 def main() -> None:

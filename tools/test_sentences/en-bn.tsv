@@ -1,0 +1,5 @@
+# source (en) <TAB> reference (bn) -- used by quantize_and_verify.py --test-file
+# Bengali is receive-only in this app (no STT, spec #3.4) -- only en->bn is
+# ever called in production, so no bn-en.tsv exists.
+Where is the nearest hospital?	হাসপাতাল
+Please send help immediately.	সাহায্য

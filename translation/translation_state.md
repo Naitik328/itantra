@@ -304,6 +304,43 @@ still needs a real Android device. What's verified here is the
 *orchestration logic* (routing, config parsing, fail-loud behavior), which
 is real and independent of that gap.
 
+### Telugu and Bengali verified the same way as Hindi (2026-09-03)
+
+Found and fixed a gap while extending verification to `te`/`bn`: both
+`greedy_decode_onnx` (Python reference) and `greedy_decode_onnx_embedded`
+were feeding raw native-script Telugu/Bengali text straight to the
+tokenizer, with no Devanagari-pivot transliteration first. The earlier
+`hi↔en` tests never caught this because Hindi *is* Devanagari natively —
+there was nothing to transliterate. For Telugu/Bengali this matters:
+the vocab is 61.5% Devanagari / ~0.1% Telugu / ~0.1% Bengali (measured
+earlier, see "Package size"), so skipping the transliteration step would
+have fed the model text its vocabulary can barely represent — not what
+`IndicProcessor.kt`'s real pipeline does, and not a meaningful test.
+
+Fixed: added `transliterate()` to `indictrans_common.py` (same
+offset-based algorithm as `UnicodeIndicTransliterator.kt`, ported from
+indic_nlp_library) and applied it — source text into Devanagari before
+tokenization, output text out of Devanagari after detokenization —
+in both `greedy_decode_onnx` and `greedy_decode_onnx_embedded`, plus
+`verify_tokenizer_ids()`'s input. This makes the Python verify tooling
+actually mirror the real pipeline for te/bn, not just for hi.
+
+Added `tools/test_sentences/en-te.tsv`, `te-en.tsv`, `en-bn.tsv` (no
+`bn-en.tsv` — Bengali has no STT, spec §3.4, so that direction is never
+called in production) and ran `verify_tokenizer_ids()` + real translation
+for all three. All pass, with real native-script output matching hand-
+written references closely:
+
+| Pair | Result |
+|---|---|
+| en→te | "Where is the nearest hospital?" → `సమీప ఆసుపత్రి ఎక్కడ ఉంది` (exact match to reference) |
+| en→bn | "Where is the nearest hospital?" → `নিকটতম হাসপাতাল কোথায়` (exact match to reference) |
+| te→en | `సమీప ఆసుపత్రి ఎక్కడ ఉంది?` → "Where is the nearest hospital ?" (exact round trip) |
+
+**Every language pair this app actually uses (spec's exact 5 directed
+pairs: hi→en, te→en, en→hi, en→te, en→bn) now has a curated test file and
+a clean `verify_tokenizer_ids()` pass against real weights.**
+
 ---
 
 ## What's left
@@ -312,11 +349,9 @@ is real and independent of that gap.
    are verified (see above); `OnnxMtAdapter`'s actual ONNX session calls
    (encoder/decoder/tokenizer custom-op) still need a real Android
    device/emulator to exercise — the biggest remaining untested surface.
-2. **Export `te`/`bn`** the same way — only `en↔hi` and `hi→en` have full
-   test-file verification so far. A quick spot-check of en→te and en→bn
-   raw model output did run and looked structurally right (Devanagari-
-   pivoted, as expected pre-transliteration), but neither has a curated
-   test file or a full `verify_tokenizer_ids()` pass yet.
+2. ~~Export `te`/`bn` the same way~~ — **done, see below.** All five
+   language pairs the app actually uses (hi↔en, te↔en, en→bn) now have
+   curated test files and a clean `verify_tokenizer_ids()` pass.
 3. **`ModelLifecycle`** (spec §6.2 full tiered residency across STT/MT/TTS,
    not just `OnnxMtAdapter`'s own `evictIdle()`) — blocked on D3
    (docs/CLAUDE.md §2). `Orchestrator.evictIdleModels()` forwards to what
@@ -409,3 +444,12 @@ Hindi/English STT/TTS already work.
   `languages.json` and drives the full pivot-routing logic with fake
   adapters — all 15 checks pass, including the same-language shortcut
   making zero MT calls and a Bengali send failing loudly (no STT).
+- **2026-09-03** — Extended verification to Telugu and Bengali. Found and
+  fixed a real gap: the Python verify tooling wasn't transliterating te/bn
+  text to the Devanagari pivot before tokenization (hi↔en tests never
+  caught this, since Hindi is already Devanagari). Added `transliterate()`
+  to `indictrans_common.py` and wired it into both decode paths. All five
+  language pairs the app actually uses now have curated test files and a
+  clean `verify_tokenizer_ids()` + real-translation pass — en→te and
+  en→bn produced exact matches to hand-written Telugu/Bengali references,
+  and te→en round-tripped back to the original English exactly.
