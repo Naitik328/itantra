@@ -1,0 +1,15 @@
+# Run export_indictrans2_onnx.py and quantize_and_verify.py in an environment
+# with HF access (Colab / Kaggle / local) -- not in the app sandbox.
+# See docs/CLAUDE.md #4 (build order) and docs/ITANTRA_INTEGRATION_SPEC.md #7.4/#8.1.
+
+torch>=2.1
+transformers>=4.40
+onnx>=1.16
+onnxruntime>=1.17
+sentencepiece>=0.2
+numpy<2
+
+# AI4Bharat's IndicTrans2 tokenizer. If the HF checkpoint's own tokenizer
+# (loaded via trust_remote_code) doesn't work standalone, install this and
+# rerun with --tokenizer-type indictrans-toolkit.
+IndicTransToolkit @ git+https://github.com/VarunGumma/IndicTransToolkit.git
