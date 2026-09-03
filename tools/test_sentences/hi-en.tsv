@@ -1,0 +1,4 @@
+# source (hi) <TAB> reference (en) -- used by quantize_and_verify.py --test-file
+# Add more lines as real failures/edge cases come up; keep this file small and curated.
+निकटतम अस्पताल कहाँ है?	hospital
+कृपया तुरंत सहायता भेजें।	help
