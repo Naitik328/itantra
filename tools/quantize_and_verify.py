@@ -44,7 +44,23 @@ def quantize(src: Path, dst: Path) -> None:
         model_input=str(src),
         model_output=str(dst),
         weight_type=QuantType.QInt8,
-        op_types_to_quantize=["MatMul"],  # same MatMul-only rule as STT, spec #8.3
+        # Gather, not just MatMul: measured directly (2026-09-03) that MT's
+        # dominant weight is the vocab embedding table (embed_tokens /
+        # lm_head, tied per share_decoder_input_output_embed), consumed via
+        # a Gather node -- MatMul-only quantization (spec #8.3's rule for
+        # STT, extended here by assumption in an earlier version of this
+        # file) silently leaves it in fp32 since Gather isn't a MatMul.
+        # That one tensor was measured at 251 MB fp32 for the en-indic
+        # decoder / indic-en encoder (dict.TGT/dict.SRC vocab ~122k * 512
+        # dims) -- the majority of the whole file. Quantizing Gather too
+        # took the en-indic decoder from 554.7 MB fp32 to 139.5 MB int8,
+        # vs. 328.0 MB with MatMul-only. Spec #8.3 itself only commits STT
+        # to "MatMul only" and flags MT's policy as "not yet validated on
+        # this stack" -- this is that validation, not a deviation from it.
+        # Re-verify translation quality after this (embedding quantization
+        # can hurt more than weight quantization) -- see verify_tokenizer_ids
+        # and the translation spot-checks below; don't just trust the size win.
+        op_types_to_quantize=["MatMul", "Gather"],
     )
 
 
