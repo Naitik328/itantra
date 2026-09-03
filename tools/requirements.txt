@@ -8,6 +8,12 @@ onnx>=1.16
 onnxruntime>=1.17
 sentencepiece>=0.2
 numpy<2
+huggingface_hub>=0.20
+
+# Needed by quantize_and_verify.py to actually run the merged
+# tokenizer-embedded ONNX graph locally (registers the ai.onnx.contrib
+# custom-op library into onnxruntime.SessionOptions). See tools/tokenizer_graph.py.
+onnxruntime-extensions>=0.10
 
 # AI4Bharat's IndicTrans2 tokenizer. If the HF checkpoint's own tokenizer
 # (loaded via trust_remote_code) doesn't work standalone, install this and

@@ -9,16 +9,28 @@ idea: decode real inputs through the exported artifact and cross-check).
 
 Policy: int8 dynamic quantization, standard for seq2seq (spec #8.3) --
 unlike TTS, MT is not exempted from quantization.
+
+If export_indictrans2_onnx.py ran with --embed-tokenizer (the default),
+verification here does something extra and non-optional: it checks that the
+in-graph SentencepieceTokenizer's output ids for each test sentence exactly
+match the real HF tokenizer's ids for the same string. Those graph settings
+(add_bos/add_eos/fairseq_vocab_shift) were flagged UNVERIFIED at export time
+-- this is where they get verified, or don't. A mismatch here means the
+model is silently seeing different tokens than it was trained on, which is
+worse than an error: it looks like it's working and produces fluent-but-
+wrong translations. See tools/tokenizer_graph.py's module doc.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import sys
 from pathlib import Path
 
 from indictrans_common import (
     CHECKPOINTS,
+    flores_tag,
     greedy_decode_onnx,
     load_model_and_tokenizer,
     model_size_mb,
@@ -62,6 +74,57 @@ def load_test_pairs(path: Path) -> list[tuple[str, str]]:
     return pairs
 
 
+def _extensions_session_options():
+    import onnxruntime as ort
+    from onnxruntime_extensions import get_library_path
+
+    opts = ort.SessionOptions()
+    opts.register_custom_ops_library(get_library_path())
+    return opts
+
+
+def verify_tokenizer_ids(out_dir: Path, tokenizer, src_lang: str, tgt_lang: str, test_file: Path) -> None:
+    """The mandatory check described in the module docstring. Raises
+    SystemExit (not a warning) on the first mismatch -- this is a
+    correctness gate, not a nice-to-have.
+    """
+    import numpy as np
+    import onnxruntime as ort
+
+    bridge_path = out_dir / "tokenizer_bridge_debug.onnx"
+    if not bridge_path.exists():
+        print(f"No {bridge_path.name} found -- skipping tokenizer id verification "
+              f"(export must have run with --no-embed-tokenizer).", file=sys.stderr)
+        return
+
+    session = ort.InferenceSession(str(bridge_path), sess_options=_extensions_session_options())
+    src_tag = flores_tag(src_lang)
+    tgt_tag = flores_tag(tgt_lang)
+
+    pairs = load_test_pairs(test_file)
+    print(f"\nVerifying in-graph tokenizer ids against the real HF tokenizer ({len(pairs)} sentences)...")
+    for src, _ref in pairs:
+        # Both tags, matching IndicProcessor's real preprocessing format
+        # (processor.pyx's _preprocess) -- see indictrans_common.py's note.
+        text = f"{src_tag} {tgt_tag} {src}"
+        (graph_ids, _row_splits) = session.run(None, {"raw_text": np.array([text], dtype=object)})
+        graph_ids = graph_ids[0].tolist()
+
+        expected_ids = tokenizer(text, return_tensors="np")["input_ids"][0].tolist()
+
+        if graph_ids != expected_ids:
+            raise SystemExit(
+                f"TOKENIZER ID MISMATCH for {text!r}:\n"
+                f"  in-graph : {graph_ids}\n"
+                f"  reference: {expected_ids}\n"
+                f"This means --add-bos/--add-eos/--fairseq-vocab-shift on "
+                f"export_indictrans2_onnx.py don't match what this checkpoint's "
+                f"real tokenizer does. Fix the flags and re-export -- do not ship "
+                f"encoder.onnx with mismatched tokenization."
+            )
+    print("Tokenizer ids match the reference tokenizer for every test sentence.")
+
+
 def verify(
     out_dir: Path,
     model_name_or_path: str,
@@ -69,13 +132,16 @@ def verify(
     src_lang: str,
     tgt_lang: str,
     test_file: Path,
+    embed_tokenizer: bool,
 ) -> None:
     import onnxruntime as ort
 
     print(f"Loading tokenizer from {model_name_or_path} for verification ...", file=sys.stderr)
     loaded = load_model_and_tokenizer(model_name_or_path, tokenizer_type)
 
-    encoder_session = ort.InferenceSession(str(out_dir / "encoder.int8.onnx"))
+    if embed_tokenizer:
+        verify_tokenizer_ids(out_dir, loaded.tokenizer, src_lang, tgt_lang, test_file)
+
     decoder_session = ort.InferenceSession(str(out_dir / "decoder.int8.onnx"))
 
     pairs = load_test_pairs(test_file)
@@ -86,7 +152,11 @@ def verify(
     print("-" * 100)
     mismatches = 0
     for src, ref in pairs:
-        got = greedy_decode_onnx(encoder_session, decoder_session, loaded.tokenizer, src, src_lang, tgt_lang)
+        if embed_tokenizer:
+            got = greedy_decode_onnx_embedded(out_dir, decoder_session, src, src_lang, tgt_lang)
+        else:
+            encoder_session = ort.InferenceSession(str(out_dir / "encoder.int8.onnx"))
+            got = greedy_decode_onnx(encoder_session, decoder_session, loaded.tokenizer, src, src_lang, tgt_lang)
         flag = "" if ref.strip().lower() in got.strip().lower() else "  <-- MISMATCH (eyeball this, not a hard fail)"
         if flag:
             mismatches += 1
@@ -95,6 +165,53 @@ def verify(
     print(f"\n{len(pairs) - mismatches}/{len(pairs)} contained the expected reference substring.")
     print("A quantized seq2seq model paraphrasing correctly-meaning output is normal;")
     print("read the outputs, don't just count mismatches.")
+
+
+def greedy_decode_onnx_embedded(out_dir: Path, decoder_session, text: str, src_lang: str, tgt_lang: str,
+                                 max_new_tokens: int = 128) -> str:
+    """Same shape as greedy_decode_onnx() in indictrans_common.py, but for
+    the tokenizer-embedded pipeline: the encoder takes raw text (no
+    pre-tokenization needed), and a separate detokenizer.onnx converts the
+    final ids to text instead of tokenizer.decode(). This is the reference
+    OnnxMtAdapter.kt's decode loop must match -- keep them in lockstep.
+    """
+    import numpy as np
+    import onnxruntime as ort
+
+    vocab_ids = json.loads((out_dir / "vocab_ids.json").read_text(encoding="utf-8"))
+    src_tag = flores_tag(src_lang)
+    tgt_tag = flores_tag(tgt_lang)
+
+    opts = _extensions_session_options()
+    encoder_session = ort.InferenceSession(str(out_dir / "encoder.int8.onnx"), sess_options=opts)
+    detok_session = ort.InferenceSession(str(out_dir / "detokenizer.onnx"), sess_options=opts)
+
+    src_text = f"{src_tag} {tgt_tag} {text}"
+    (encoder_hidden_states,) = encoder_session.run(None, {"raw_text": np.array([src_text], dtype=object)})
+    src_len = encoder_hidden_states.shape[1]
+    attention_mask = np.ones((1, src_len), dtype=np.int64)
+
+    tgt_tag_id = vocab_ids["lang_tag_ids"][tgt_tag]
+    decoder_start_id = vocab_ids["decoder_start_id"]
+    eos_id = vocab_ids["eos_id"]
+
+    decoder_input_ids = np.array([[decoder_start_id, tgt_tag_id]], dtype=np.int64)
+    for _ in range(max_new_tokens):
+        (logits,) = decoder_session.run(
+            None,
+            {
+                "decoder_input_ids": decoder_input_ids,
+                "encoder_hidden_states": encoder_hidden_states,
+                "encoder_attention_mask": attention_mask,
+            },
+        )
+        next_id = int(logits[0, -1].argmax())
+        decoder_input_ids = np.concatenate([decoder_input_ids, np.array([[next_id]], dtype=np.int64)], axis=1)
+        if eos_id is not None and next_id == eos_id:
+            break
+
+    (text_out,) = detok_session.run(None, {"ids": decoder_input_ids})
+    return text_out[0]
 
 
 def main() -> None:
@@ -111,6 +228,10 @@ def main() -> None:
         help="TSV of 'source<TAB>reference' lines. Skips verification if omitted.",
     )
     parser.add_argument("--skip-verify", action="store_true")
+    parser.add_argument(
+        "--embed-tokenizer", action=argparse.BooleanOptionalAction, default=True,
+        help="Must match what export_indictrans2_onnx.py was run with (default: on).",
+    )
     args = parser.parse_args()
 
     out_dir = args.out_dir or args.in_dir
@@ -132,7 +253,25 @@ def main() -> None:
     print(f"encoder: {model_size_mb(encoder_src):.1f} MB -> {model_size_mb(encoder_dst):.1f} MB")
     print(f"decoder: {model_size_mb(decoder_src):.1f} MB -> {model_size_mb(decoder_dst):.1f} MB")
 
-    write_sha256sums(out_dir, [encoder_dst, decoder_dst])
+    shipped_files = [encoder_dst, decoder_dst]
+    if args.embed_tokenizer:
+        detok_src = args.in_dir / "detokenizer.onnx"
+        vocab_ids_src = args.in_dir / "vocab_ids.json"
+        if not detok_src.exists() or not vocab_ids_src.exists():
+            raise SystemExit(
+                f"Missing detokenizer.onnx/vocab_ids.json in {args.in_dir} -- "
+                f"re-run export_indictrans2_onnx.py, or pass --no-embed-tokenizer "
+                f"if this direction intentionally used the old plain graphs."
+            )
+        # detokenizer.onnx is a tiny custom-op graph, not weights -- not quantized.
+        detok_dst = out_dir / "detokenizer.onnx"
+        vocab_ids_dst = out_dir / "vocab_ids.json"
+        if detok_src != detok_dst:
+            detok_dst.write_bytes(detok_src.read_bytes())
+            vocab_ids_dst.write_text(vocab_ids_src.read_text(encoding="utf-8"), encoding="utf-8")
+        shipped_files += [detok_dst, vocab_ids_dst]
+
+    write_sha256sums(out_dir, shipped_files)
     print(f"Wrote {out_dir / 'SHA256SUMS.txt'} (spec #4.6 -- verify every download against this).")
 
     if args.skip_verify or args.test_file is None:
@@ -140,7 +279,8 @@ def main() -> None:
         return
 
     model_name_or_path = args.model_name_or_path or CHECKPOINTS[args.direction]
-    verify(out_dir, model_name_or_path, args.tokenizer_type, args.src_lang, args.tgt_lang, args.test_file)
+    verify(out_dir, model_name_or_path, args.tokenizer_type, args.src_lang, args.tgt_lang,
+           args.test_file, args.embed_tokenizer)
 
 
 if __name__ == "__main__":

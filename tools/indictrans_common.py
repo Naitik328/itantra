@@ -119,7 +119,12 @@ def greedy_decode_onnx(
     src_tag = flores_tag(src_lang)
     tgt_tag = flores_tag(tgt_lang)
 
-    src_text = f"{src_tag} {text}"
+    # Both tags prepended to the SOURCE text, matching IndicProcessor's real
+    # preprocessing (processor.pyx's _preprocess: f"{src_lang} {tgt_lang}
+    # {processed_sent}") -- not just the source tag. This was wrong in an
+    # earlier version of this function; caught while wiring up the in-graph
+    # tokenizer path in tools/tokenizer_graph.py, which reuses this format.
+    src_text = f"{src_tag} {tgt_tag} {text}"
     enc = tokenizer(src_text, return_tensors="np")
     input_ids = enc["input_ids"].astype(np.int64)
     attention_mask = enc["attention_mask"].astype(np.int64)
