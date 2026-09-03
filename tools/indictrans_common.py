@@ -102,6 +102,7 @@ def greedy_decode_onnx(
     encoder_session,
     decoder_session,
     tokenizer,
+    decoder_start_id: int,
     text: str,
     src_lang: str,
     tgt_lang: str,
@@ -113,6 +114,12 @@ def greedy_decode_onnx(
     export_indictrans2_onnx.py for why. This is the same decode loop
     OnnxMtAdapter.kt must replicate at runtime; keep them in lockstep if you
     change either one.
+
+    decoder_start_id must come from the checkpoint's own
+    model.config.decoder_start_token_id -- pass it in, don't assume it
+    equals eos_token_id. It does for the en-indic checkpoint (both are 2,
+    confirmed by reproducing model.generate() token-for-token), but that's a
+    fact about this one checkpoint, not a rule to bake in here.
     """
     import numpy as np
 
@@ -133,11 +140,16 @@ def greedy_decode_onnx(
         None, {"input_ids": input_ids, "attention_mask": attention_mask}
     )
 
-    tgt_tag_id = tokenizer.convert_tokens_to_ids(tgt_tag)
-    bos_id = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tgt_tag_id
+    # decoder_input_ids seeded with ONLY decoder_start_token_id -- confirmed
+    # by manually reproducing model.generate()'s output token-for-token with
+    # a bare use_cache=False loop. No separate target-tag token goes to the
+    # decoder; the target language is already encoded in the source sequence
+    # (tokenizer_graph.py's module doc, points 3-4). An earlier version of
+    # this function seeded [bos_id, tgt_tag_id], which was wrong on two
+    # counts: decoder_start_token_id (config.json) is not bos_token_id here
+    # (2 vs 0), and the tgt_tag_id token doesn't belong on the decoder side.
     eos_id = tokenizer.eos_token_id
-
-    decoder_input_ids = np.array([[bos_id, tgt_tag_id]], dtype=np.int64)
+    decoder_input_ids = np.array([[decoder_start_id]], dtype=np.int64)
 
     for _ in range(max_new_tokens):
         (logits,) = decoder_session.run(

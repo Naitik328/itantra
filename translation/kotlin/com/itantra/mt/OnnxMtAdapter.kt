@@ -5,6 +5,7 @@ import ai.onnxruntime.OnnxValue
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import ai.onnxruntime.extensions.OrtxPackage
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.nio.LongBuffer
@@ -15,22 +16,40 @@ import java.nio.LongBuffer
  * See docs/ITANTRA_INTEGRATION_SPEC.md #7.4, #6.2 (residency), #6.3 (threads),
  * #6.4 (CPU only).
  *
- * Tokenization is IN-GRAPH (onnxruntime-extensions' SentencepieceTokenizer /
- * SentencepieceDecoder custom ops, baked into encoder.onnx / detokenizer.onnx
- * at export time -- see tools/tokenizer_graph.py) rather than a Kotlin
+ * Tokenization is IN-GRAPH (onnxruntime-extensions' SentencepieceTokenizer
+ * custom op plus a vocabulary-remap Gather, baked into encoder.onnx at
+ * export time -- see tools/tokenizer_graph.py) rather than a Kotlin
  * tokenizer implementation. This resolves what MtTokenizer.kt used to flag
  * as a blocking gap (no first-party Android SentencePiece binding); that
- * file and interface no longer exist. What this adapter now needs from
- * Android is just the `onnxruntime-extensions-android` AAR, loaded as a
- * custom-op library via [OrtxPackage.getLibraryPath] -- import path and
- * exact API not verified against the real AAR (no Kotlin toolchain in this
- * environment); confirm on first compile.
+ * file and interface no longer exist. What this adapter needs from Android
+ * is the `onnxruntime-extensions-android` AAR, loaded as a custom-op
+ * library via [OrtxPackage.getLibraryPath] -- import path and exact API
+ * not verified against the real AAR (no Kotlin toolchain available); the
+ * ONNX/Python side of this design IS verified -- see below.
  *
- * Correctness of the baked-in tokenizer settings (add_bos/add_eos/
- * fairseq_vocab_shift) is NOT something this file can guarantee --
- * tools/quantize_and_verify.py's verify_tokenizer_ids() checks them against
- * the real HF tokenizer at export time and fails the export if they're
- * wrong. Only ship model files that passed that check.
+ * Everything about the encoder input/decoder-seed/detokenize shapes below
+ * was confirmed 2026-09-03 against the real tokenization_indictrans.py,
+ * config.json, and end-to-end runs of both directions with real weights
+ * (verify_tokenizer_ids() passing exact id matches, and greedy_decode_onnx_
+ * embedded() in tools/quantize_and_verify.py producing correct translations
+ * -- e.g. "Where is the nearest hospital?" -> "निकटतम अस्पताल कहाँ है",
+ * round-tripped back to English correctly). It is not a guess:
+ *   - IndicTransTokenizer's vocabulary is a separate fairseq-style
+ *     dictionary, not the raw sentencepiece ids -- the encoder embeds a
+ *     Gather-based remap table built from the real dict.SRC.json at export
+ *     time. Nothing to do here about that; it's inside encoder.onnx.
+ *   - Encoder input_ids = [srcTagId, tgtTagId, <sentencepiece-encoded,
+ *     remapped text>, eosId] -- both tag ids AND eos come from dict.SRC
+ *     (yes, even the target-language tag; it's a second token in the
+ *     *source* sequence, not fed to the decoder).
+ *   - decoder_input_ids is seeded with ONLY decoder_start_id (config.json's
+ *     value -- for these checkpoints it equals eos_id, 2, but that's a fact
+ *     about these checkpoints, not assumed here). No separate tgtTagId
+ *     token goes to the decoder.
+ *   - Detokenizing is a plain string join, not a SentencePiece decode:
+ *     `pieces.joinToString("").replace("▁", " ").trim()` over the pieces
+ *     named by tgt_vocab.json at each output id. No detokenizer.onnx, no
+ *     second custom op.
  *
  * Pivot-only by design, matching the two checkpoints this project actually
  * exports (indictrans_common.py's CHECKPOINTS: en-indic, indic-en) -- see
@@ -41,11 +60,11 @@ import java.nio.LongBuffer
  *
  * Bundle layout extends spec #8.4, which shows one encoder/decoder pair
  * under `mt/` -- too small for two directions. This adapter expects:
- *   <modelRoot>/en-indic/encoder.int8.onnx     (raw text in, hidden states out)
- *   <modelRoot>/en-indic/decoder.int8.onnx     (ids in, logits out)
- *   <modelRoot>/en-indic/detokenizer.onnx      (ids in, text out)
- *   <modelRoot>/en-indic/vocab_ids.json        (decoder_start_id, eos_id, lang_tag_ids)
- *   <modelRoot>/indic-en/...                   (same four files)
+ *   <modelRoot>/en-indic/encoder.int8.onnx   (raw text + 2 tag ids in, hidden states out)
+ *   <modelRoot>/en-indic/decoder.int8.onnx   (ids in, logits out)
+ *   <modelRoot>/en-indic/vocab_ids.json      (decoder_start_id, eos_id, lang_tag_ids)
+ *   <modelRoot>/en-indic/tgt_vocab.json      (id-indexed piece-string array for detokenizing)
+ *   <modelRoot>/indic-en/...                 (same four files)
  * (SHA256SUMS.txt lives alongside each set, written by quantize_and_verify.py.)
  *
  * Decoder has no KV cache (see export_indictrans2_onnx.py's module doc) --
@@ -64,14 +83,14 @@ class OnnxMtAdapter(
     private data class VocabIds(
         val decoderStartId: Int,
         val eosId: Int,
-        val langTagIds: Map<String, Int>, // FLORES tag -> vocab id
+        val langTagIds: Map<String, Int>, // FLORES tag -> dict.SRC-space id
     )
 
     private class DirectionSession(
         val encoder: OrtSession,
         val decoder: OrtSession,
-        val detokenizer: OrtSession,
         val vocab: VocabIds,
+        val tgtVocab: List<String>, // id-indexed piece strings, for detokenizing this direction's output
     ) {
         var lastUsedAtMillis: Long = System.currentTimeMillis()
         fun touch() {
@@ -81,7 +100,6 @@ class OnnxMtAdapter(
         fun close() {
             encoder.close()
             decoder.close()
-            detokenizer.close()
         }
     }
 
@@ -101,13 +119,15 @@ class OnnxMtAdapter(
 
         val session = sessionFor(direction)
         val vocab = session.vocab
+        val srcTagId = vocab.langTagIds[srcTag]
+            ?: error("No lang_tag_ids entry for '$srcTag' in $direction/vocab_ids.json -- this direction can't take $sourceLang as source.")
         val tgtTagId = vocab.langTagIds[tgtTag]
             ?: error("No lang_tag_ids entry for '$tgtTag' in $direction/vocab_ids.json -- this direction can't decode into $targetLang.")
 
         val pre = IndicProcessor.preprocess(text, srcTag, tgtTag)
-        val (encoderHidden, srcLen, hiddenSize) = runEncoder(session.encoder, pre.text)
-        val outputIds = greedyDecode(session.decoder, srcLen, encoderHidden, hiddenSize, vocab, tgtTagId)
-        val decoded = runDetokenizer(session.detokenizer, outputIds)
+        val (encoderHidden, srcLen, hiddenSize) = runEncoder(session.encoder, pre.text, srcTagId, tgtTagId, vocab.eosId)
+        val outputIds = greedyDecode(session.decoder, srcLen, encoderHidden, hiddenSize, vocab)
+        val decoded = detokenize(session.tgtVocab, outputIds, vocab.eosId)
 
         session.touch()
         return IndicProcessor.postprocess(decoded, tgtTag, pre.placeholders)
@@ -134,13 +154,13 @@ class OnnxMtAdapter(
                 setIntraOpNumThreads(numThreads) // spec #6.3
                 // CPU only -- spec #6.4: NNAPI is untested and known to partition
                 // VITS/Conformer graphs poorly; no execution provider is added here.
-                registerCustomOpLibrary(OrtxPackage.getLibraryPath()) // ai.onnx.contrib tokenizer ops
+                registerCustomOpLibrary(OrtxPackage.getLibraryPath()) // ai.onnx.contrib tokenizer op
             }
             DirectionSession(
                 encoder = env.createSession(File(dir, "encoder.int8.onnx").absolutePath, opts),
                 decoder = env.createSession(File(dir, "decoder.int8.onnx").absolutePath, opts),
-                detokenizer = env.createSession(File(dir, "detokenizer.onnx").absolutePath, opts),
                 vocab = loadVocabIds(File(dir, "vocab_ids.json")),
+                tgtVocab = loadTgtVocab(File(dir, "tgt_vocab.json")),
             )
         }.also { it.touch() }
 
@@ -155,16 +175,37 @@ class OnnxMtAdapter(
         )
     }
 
+    private fun loadTgtVocab(path: File): List<String> {
+        val array = JSONArray(path.readText())
+        return List(array.length()) { array.getString(it) }
+    }
+
     /** @return (flattened encoder_hidden_states, srcLen, hiddenSize) */
-    private fun runEncoder(encoder: OrtSession, text: String): Triple<FloatArray, Int, Int> {
+    private fun runEncoder(encoder: OrtSession, text: String, srcTagId: Int, tgtTagId: Int, eosId: Int): Triple<FloatArray, Int, Int> {
         OnnxTensor.createTensor(env, arrayOf(text)).use { textTensor ->
-            encoder.run(mapOf("raw_text" to textTensor)).use { result ->
-                val output = firstTensor(result)
-                val shape = output.info.shape // [1, srcLen, hidden] -- srcLen is only known now,
-                val srcLen = shape[1].toInt()  // decided by the in-graph tokenizer, not by us.
-                val hidden = shape[2].toInt()
-                val flat = flattenFloat3d(output.floatBuffer, srcLen, hidden)
-                return Triple(flat, srcLen, hidden)
+            scalarLongTensor(srcTagId).use { srcTagTensor ->
+                scalarLongTensor(tgtTagId).use { tgtTagTensor ->
+                    scalarLongTensor(eosId).use { eosTensor ->
+                        val inputs = mapOf(
+                            "raw_text" to textTensor,
+                            "src_tag_id" to srcTagTensor,
+                            "tgt_tag_id" to tgtTagTensor,
+                            "eos_id_const" to eosTensor,
+                        )
+                        encoder.run(inputs).use { result ->
+                            val output = firstTensor(result) // only output: encoder_hidden_states
+                            // attention_mask is NOT a merged-graph output (onnx.compose drops any
+                            // tokenizer-bridge output consumed via io_map during the export-time
+                            // merge -- confirmed empirically, see tokenizer_graph.py) -- srcLen
+                            // comes from this shape instead, same as quantize_and_verify.py does.
+                            val shape = output.info.shape // [1, srcLen, hidden]
+                            val srcLen = shape[1].toInt()
+                            val hidden = shape[2].toInt()
+                            val flat = flattenFloat3d(output.floatBuffer, srcLen, hidden)
+                            return Triple(flat, srcLen, hidden)
+                        }
+                    }
+                }
             }
         }
     }
@@ -175,9 +216,12 @@ class OnnxMtAdapter(
         encoderHidden: FloatArray,
         hiddenSize: Int,
         vocab: VocabIds,
-        tgtTagId: Int,
     ): IntArray {
-        val decoderIds = mutableListOf(vocab.decoderStartId, tgtTagId)
+        // Seeded with ONLY decoder_start_id -- no separate target-tag token.
+        // The target language is already encoded in the source sequence
+        // (see class doc). Confirmed by reproducing model.generate()'s
+        // output token-for-token with this exact seed.
+        val decoderIds = mutableListOf(vocab.decoderStartId)
 
         // encoder_hidden_states / encoder_attention_mask are identical on every
         // decode step (only decoder_input_ids grows) -- build them once.
@@ -213,15 +257,22 @@ class OnnxMtAdapter(
         }
     }
 
-    private fun runDetokenizer(detokenizer: OrtSession, ids: IntArray): String {
-        longTensor(ids, longArrayOf(1, ids.size.toLong())).use { idsTensor ->
-            detokenizer.run(mapOf("ids" to idsTensor)).use { result ->
-                val value = result.iterator().next().value
-                @Suppress("UNCHECKED_CAST")
-                return ((value as OnnxTensor).value as Array<String>)[0]
-            }
+    /**
+     * IndicTransTokenizer.convert_tokens_to_string, exactly -- a plain
+     * string join, not a SentencePiece decode (see class doc). Skips the
+     * seed token (decoder_start_id, never real content) and eos.
+     */
+    private fun detokenize(tgtVocab: List<String>, ids: IntArray, eosId: Int): String {
+        val sb = StringBuilder()
+        for (id in ids) {
+            if (id == eosId) continue
+            if (id in tgtVocab.indices) sb.append(tgtVocab[id])
         }
+        return sb.toString().replace("▁", " ").trim()
     }
+
+    private fun scalarLongTensor(value: Int): OnnxTensor =
+        OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(value.toLong())), longArrayOf(1))
 
     private fun longTensor(values: IntArray, shape: LongArray): OnnxTensor =
         OnnxTensor.createTensor(env, LongBuffer.wrap(LongArray(values.size) { values[it].toLong() }), shape)
