@@ -120,40 +120,85 @@ Spec §8.3 only commits STT to "MatMul only"; MT's own row says "not yet
 validated on this stack" — this *is* that validation, not a deviation
 from a rule that was never actually specified for MT.
 
-**Still ~136 MB over a 300 MB target.** Real remaining levers, roughly
-ordered by effort:
+**Still ~136 MB over a 300 MB target.**
 
-1. **Vocabulary pruning** (biggest remaining win, not yet done). The
-   embedding table is sized for IndicTrans2's full ~30-language family;
-   this app only ever needs en/hi/te/bn. `dict.SRC.json`/`dict.TGT.json`
-   contain tens of thousands of pieces for scripts/languages this project
-   never ships. Slicing the embedding+lm_head rows down to only the ids
-   reachable for our 4 languages (Devanagari/Telugu/Bengali/Latin script
-   ranges + specials + tags), and remapping `dict.SRC.json`/
-   `dict.TGT.json` + the Gather remap table to match, could plausibly cut
-   the largest remaining tables by 60–80% — but this is real model
-   surgery (slice PyTorch tensors before export, rebuild both dict files,
-   re-verify `verify_tokenizer_ids()` and translation quality from
-   scratch) and hasn't been attempted. This is the next thing to try if
-   300 MB is a hard requirement.
-2. **Even more aggressive quantization** (int4, or static/calibrated
-   quantization instead of dynamic) — smaller effort than #1 but higher
-   quality risk, and dynamic int8 is what the spec's own STT precedent
-   uses; would need its own accuracy validation.
-3. **Scope tradeoff** — e.g. ship only one direction as the "default"
-   package and download the other on demand (mirrors the D1 packaging
-   options in spec §2.3, applied to MT). Doesn't reduce total download
-   for a user who ends up needing both directions, only defers it.
-4. **Accept ~436 MB for MT** and revisit the *overall* app budget instead
+#### CORRECTION (still 2026-09-03): the vocabulary-pruning plan above was wrong
+
+The original plan (item 1 below, kept struck through for the record) assumed
+`dict.SRC.json`/`dict.TGT.json`'s ~122k-entry multilingual vocabulary was
+split by native script, so a Telugu-only build could drop the
+Hindi/Bengali/other-language pieces. **Measured directly and found this
+false.** Classified all 122,706 pieces in the shared multi-Indic vocab by
+Unicode script:
+
+| | count | % of vocab |
+|---|---:|---:|
+| neutral (digits, Latin, punctuation, specials) | 46,985 | 38.3% |
+| **Devanagari (Hindi) script** | **75,518** | **61.5%** |
+| Telugu script | 64 | 0.1% |
+| Bengali script | 139 | 0.1% |
+
+Reason: every Indic language is transliterated to Devanagari *before*
+tokenization (`UnicodeIndicTransliterator`, already built into
+`IndicProcessor.kt`) — so the SentencePiece model was trained almost
+entirely on Devanagari text regardless of which Indic language it serves.
+**A Telugu-only or Bengali-only vocabulary prune would keep ~99.8% of the
+current vocabulary anyway** — there is no meaningful per-target-language
+slice to cut, because Telugu/Bengali route through the same shared
+Devanagari representation Hindi uses natively. This also means: **a
+"per-language-mapping split package" doesn't help either** — every
+language needs essentially the same vocabulary, so splitting wouldn't
+shrink anything, and if the *shared transformer body* got duplicated
+per split package (see below) it would make total storage worse.
+
+#### The real, measured floor
+
+The 268.4 MB "body" (transformer attention/FFN layers) is **not
+per-language** — it's one shared computation graph for every language the
+checkpoint knows, unsplittable by language pair without literally
+re-training separate smaller models:
+
+| | embedding (vocabulary) | body (shared, not per-language) |
+|---|---:|---:|
+| en-indic encoder | 16.5 MB | 57.5 MB |
+| en-indic decoder | 62.8 MB | 76.3 MB |
+| indic-en encoder | 62.8 MB | 58.3 MB |
+| indic-en decoder | 16.5 MB | 76.3 MB |
+| **total** | **158.6 MB** | **268.4 MB** |
+
+Given the vocabulary finding above, most of that 158.6 MB is also not
+really per-language-prunable (it's shared Devanagari infrastructure any
+Indic language needs). **~436 MB is close to the practical floor** for
+en+hi+te+bn without sacrificing quality or dropping a language.
+
+Remaining real levers, roughly ordered by effort:
+
+1. ~~Vocabulary pruning by target language~~ — **invalidated by the
+   measurement above.** Not viable as originally conceived.
+2. **Frequency-based pruning**: run real Hindi/Telugu/Bengali corpora
+   through the tokenizer, keep only Devanagari pieces that actually get
+   used, drop genuinely-unused ones (this vocab covers many Devanagari-
+   script relatives too — Marathi, Nepali, Sanskrit, Bhojpuri, etc. — some
+   of which this app never needs). Different in kind from the Gather-
+   quantization fix: uncertain savings until measured against a real
+   corpus (none available in this environment), and real quality risk —
+   words outside the sample corpus become OOV. Not attempted.
+3. **Even more aggressive quantization** (int4, or static/calibrated
+   instead of dynamic) — smaller effort than #2 but higher quality risk;
+   would need its own accuracy validation.
+4. **Scope tradeoff** — drop a language from MT support entirely (not
+   just from a "split package" — that doesn't help, see above). A real
+   product decision, not a technical one.
+5. **Accept ~436 MB for MT** and revisit the *overall* app budget instead
    — spec's own §2.2 already put Hindi+English STT/TTS alone at ~477 MB
    before MT, so a whole-app 300 MB target was already off the table
    before this investigation; worth clarifying with the team whether the
-   300 MB budget is meant for MT alone or the whole first-launch package
-   (this wasn't specified when asked, and changes which lever matters).
+   300 MB budget was ever meant for MT alone or the whole first-launch
+   package.
 
-Not implemented yet — presented as findings + options, since #1 is
-substantial surgery and #3/#4 are product/scope calls, not calls to make
-unilaterally.
+Not implemented yet — presented as findings + options. #2/#3 need real
+corpora/accuracy work this environment can't do blind, and #4/#5 are
+product/scope calls, not calls to make unilaterally.
 
 ### Preprocessing (`translation/kotlin/com/itantra/mt/`)
 
@@ -190,9 +235,11 @@ src→en→tgt.
    raw model output did run and looked structurally right (Devanagari-
    pivoted, as expected pre-transliteration), but neither has a curated
    test file or a full `verify_tokenizer_ids()` pass yet.
-3. **Decide on the package-size options above** (vocab pruning vs. scope
-   tradeoff vs. accepting ~436 MB) — needed before this is "done" for
-   packaging purposes, not just technically working.
+3. **Decide on the package-size options above** (frequency-based pruning
+   vs. int4 vs. scope tradeoff vs. accepting ~436 MB) — per-target-language
+   vocab pruning and per-language split packages are both ruled out (see
+   "Package size" section); needed before this is "done" for packaging
+   purposes, not just technically working.
 4. **Wire into `languages.json`** (spec §4.3) and the eventual
    `Orchestrator`/`ModelLifecycle` — `ModelLifecycle` is blocked on D3
    (docs/CLAUDE.md §2).
@@ -240,3 +287,16 @@ Hindi/English STT/TTS already work.
   to ~436 MB with zero measured quality change. Still ~136 MB over a
   300 MB target; vocabulary pruning is the next lever, not yet attempted
   — see "Package size" section above.
+- **2026-09-03** — Corrected the vocabulary-pruning plan above: measured
+  the multi-Indic vocab's actual script distribution and found it's
+  61.5% Devanagari / 0.1% Telugu / 0.1% Bengali, because all Indic
+  languages get transliterated to Devanagari before tokenization. A
+  Telugu-only or Bengali-only prune would keep ~99.8% of the vocab
+  anyway — no meaningful per-language slice exists. Also rules out
+  per-language-mapping split packages (asked directly): every language
+  needs essentially the same vocabulary, so splitting doesn't shrink
+  anything, and duplicating the 268.4 MB shared body per split package
+  would make total storage worse, not better. ~436 MB now treated as
+  close to the practical floor; frequency-based corpus pruning is the
+  only remaining lever with real (if uncertain) upside, and needs real
+  Hindi/Telugu/Bengali corpora this environment doesn't have.
