@@ -11,8 +11,8 @@ translation module — don't let it drift from what's actually in
 | Layer | State |
 |---|---|
 | Export tooling (Python) | Built, **run for real against real weights**, verified |
-| Preprocessing (`IndicProcessor.kt` + support files) | Ported faithfully, **not compiled** |
-| Adapter (`OnnxMtAdapter.kt`) | Matches the verified design, **not compiled** |
+| Preprocessing (`IndicProcessor.kt` + support files) | Ported faithfully, **compiled + runtime smoke-tested** |
+| Adapter (`OnnxMtAdapter.kt`) | Matches the verified design, **compiled + smoke-tested (pure-logic paths only — see below)** |
 | Android wiring (Gradle deps, `languages.json`, orchestrator) | Not started |
 | On-device validation | Not started |
 
@@ -222,15 +222,45 @@ CPU-only (§6.4). Pivot-only: rejects indic↔indic calls directly, since
 only en-indic/indic-en checkpoints exist — the orchestrator must chain
 src→en→tgt.
 
+### Compiled and smoke-tested (2026-09-03)
+
+Set up a real, standalone Kotlin compile (no Android module exists on
+this branch): downloaded `kotlinc` 2.0.21 directly, plus the real
+dependency jars — `com.microsoft.onnxruntime:onnxruntime` (desktop jar,
+same `ai.onnxruntime.*` API as `onnxruntime-android`), the real
+`onnxruntime-extensions-android` AAR's `classes.jar` (confirmed
+`OrtxPackage.getLibraryPath()` exists with the exact signature used, via
+`javap` — not assumed), and real `org.json`. **All files, including
+`OnnxMtAdapter.kt`, compile cleanly: zero errors, zero warnings, even at
+Android's typical `-jvm-target 1.8`.**
+
+Went further than just compiling: `translation/kotlin_verify/SmokeTest.kt`
++ `verify.sh` exercise the pure-logic paths at runtime (preprocessing,
+transliteration, placeholder wrap/restore, `vocab_ids.json`/
+`tgt_vocab.json` parsing, detokenize) — all pass. Notably, Kotlin's
+Telugu→Devanagari transliteration produced `"आसुपत्रि"` (hospital), the
+*exact same word* the real Python model produced when translating into
+Telugu earlier — independent cross-validation that the Kotlin port
+matches the verified Python pipeline's actual behavior, not just that it
+type-checks.
+
+**Real remaining gap, not glossed over:** `OnnxMtAdapter`'s actual
+encoder/decoder ONNX session calls are NOT exercised by this — that needs
+`onnxruntime-extensions`' native library, which only ships for Android
+ABIs (bionic libc), and this environment is desktop Linux (glibc). Full
+inference through the adapter still needs a real Android
+device/emulator. `translation/kotlin_verify/verify.sh` is reproducible
+from a clean cache and worth re-running after any future change to these
+files.
+
 ---
 
 ## What's left
 
-1. **Compile it.** No Kotlin toolchain has touched any of this yet. Needs
-   the `onnxruntime-android` + `onnxruntime-extensions-android` Gradle
-   dependencies added and a real build — the biggest untested surface
-   right now (in particular, whether `OrtxPackage.getLibraryPath()` is
-   the real AAR API).
+1. **Full on-device inference test.** Compilation and pure-logic behavior
+   are verified (see above); `OnnxMtAdapter`'s actual ONNX session calls
+   (encoder/decoder/tokenizer custom-op) still need a real Android
+   device/emulator to exercise — the biggest remaining untested surface.
 2. **Export `te`/`bn`** the same way — only `en↔hi` and `hi→en` have full
    test-file verification so far. A quick spot-check of en→te and en→bn
    raw model output did run and looked structurally right (Devanagari-
@@ -302,3 +332,15 @@ Hindi/English STT/TTS already work.
   **Decision: accept ~436 MB as the MT package size** rather than chase
   further cuts that all require either real quality risk or a product
   scope cut. Revisit only if on-device measurement (D3) forces it.
+- **2026-09-03** — Set up a real standalone Kotlin compile (downloaded
+  `kotlinc` + the real onnxruntime/onnxruntime-extensions-android/org.json
+  jars, no Android module exists on this branch yet). All files including
+  `OnnxMtAdapter.kt` compile cleanly, zero errors/warnings.
+  `kotlin_verify/SmokeTest.kt` + `verify.sh` added and passing — exercises
+  preprocessing, transliteration, placeholder handling, and vocab JSON
+  parsing at runtime. Cross-validated against the real Python pipeline:
+  Kotlin's Telugu→Devanagari transliteration produced the same word
+  ("आसुपत्रि") the real model produced translating into Telugu earlier.
+  Real gap still open: `OnnxMtAdapter`'s actual ONNX session calls need a
+  real Android device (`onnxruntime-extensions`' native lib is
+  Android-only, no desktop-Linux build to test against here).

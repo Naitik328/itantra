@@ -25,6 +25,7 @@ libraries cover.
 | `FloresTags.kt` | ISO ↔ FLORES-200 tag mapping (spec #4.1), shared by `IndicProcessor` and `OnnxMtAdapter` |
 | `MtAdapter.kt` | the adapter interface (spec #7.1) |
 | `OnnxMtAdapter.kt` | the MT adapter: in-graph tokenization, session lifecycle (spec #6.2/#6.3/#6.4), pivot-only routing, KV-cache-free greedy decode loop |
+| `kotlin_verify/SmokeTest.kt`, `kotlin_verify/verify.sh` | standalone compile + runtime check against real dependency jars — see "Compiled and smoke-tested" below |
 
 ## Tokenization: resolved, in-graph, not in Kotlin — and verified end-to-end
 
@@ -37,8 +38,8 @@ vocabulary-remap `Gather` (domain `ai.onnx.contrib`), built by
 `tools/export_indictrans2_onnx.py`. The only Android dependency is the
 `onnxruntime-extensions-android` AAR, loaded as a custom-op library at
 session-creation time (`OrtxPackage.getLibraryPath()` in `OnnxMtAdapter.kt`
-— import path and exact API not verified against the real AAR, no Kotlin
-toolchain here; confirm on first compile).
+— confirmed against the real AAR's `classes.jar` via `javap`, see
+"Compiled and smoke-tested" below).
 
 **This was run for real, on 2026-09-03, with authenticated HF access and
 real weights — not left as a documented guess.** What earlier notes here
@@ -83,8 +84,38 @@ Everything else in `OnnxMtAdapter.kt` — session loading per direction,
 idle-timeout eviction, tensor construction, the greedy decode loop — is
 real and independently reviewable against `tools/quantize_and_verify.py`'s
 `greedy_decode_onnx_embedded` (they must be kept in lockstep, and both were
-exercised against real weights together). The Kotlin file itself has still
-never been compiled; see below.
+exercised against real weights together).
+
+## Compiled and smoke-tested (2026-09-03)
+
+All files under `com/itantra/mt/` — including `OnnxMtAdapter.kt` —
+**compile cleanly** (`kotlinc`, zero errors, zero warnings, including at
+Android's typical `-jvm-target 1.8`) against the real dependency jars, not
+stubs: `com.microsoft.onnxruntime:onnxruntime` (desktop jar — same
+`ai.onnxruntime.*` API surface as `onnxruntime-android`, only the native
+library differs, which doesn't affect compiling Kotlin source),
+`onnxruntime-extensions-android`'s real `classes.jar` (confirmed
+`OrtxPackage.getLibraryPath()` exists with exactly the signature used —
+`javap`'d it directly, not assumed), and real `org.json`.
+
+`kotlin_verify/verify.sh` reproduces this from a clean cache — downloads
+the compiler + jars, compiles, and runs `SmokeTest.kt`, which exercises the
+pure-logic paths (`IndicProcessor.preprocess`/`postprocess`, script
+transliteration, placeholder wrap/restore, `vocab_ids.json`/
+`tgt_vocab.json` parsing, detokenize) end to end. All checks pass,
+including a real cross-validation: preprocessing a Telugu sentence in
+Kotlin produces the Devanagari word `"आसुपत्रि"` (hospital) — the exact
+same word the real Python model produced when translating **into**
+Telugu earlier, independently confirming the Kotlin transliteration
+matches the verified Python pipeline, not just that it runs.
+
+**What this does NOT cover:** `OnnxMtAdapter`'s actual encoder/decoder ONNX
+session calls. Those need `onnxruntime-extensions`' native library, which
+is only published for Android ABIs (arm64-v8a/armeabi-v7a/x86/x86_64,
+built against Android's bionic libc) — there's no desktop-Linux build to
+run against here. That gap is real, not silently glossed over: full
+end-to-end inference through `OnnxMtAdapter` still needs either a real
+Android device/emulator or a compatible desktop native build.
 
 ## Known gaps, on purpose
 
@@ -105,22 +136,21 @@ never been compiled; see below.
   subdirectories, each with its own `encoder.int8.onnx` / `decoder.int8.onnx`
   / `vocab_ids.json` / `tgt_vocab.json` / `SHA256SUMS.txt`. Flagging the
   deviation per docs/CLAUDE.md's own instruction to flag spec discrepancies
-  rather than silently diverge. Real measured sizes (int8, this checkpoint
-  family): en-indic encoder 119.5 MB / decoder 313.1 MB; indic-en encoder
-  299.9 MB / decoder 136.6 MB — encoder/decoder trade places in size
+  rather than silently diverge. Real measured int8 sizes, current (see
+  `translation_state.md`'s "Package size" section for the full
+  investigation, including a fix that roughly halved these from the first
+  measurement): en-indic encoder 71.8 MB / decoder 133.0 MB; indic-en
+  encoder 119.8 MB / decoder 88.9 MB — encoder/decoder trade places in size
   because dict.SRC/dict.TGT swap which one is the "many Indic languages"
   vocabulary per direction. These replace the spec's own "~100-150 MB,
   estimated" placeholder (§2.1) with real numbers — worth feeding back into
   the D1 packaging decision (spec §2.3).
-- **The Kotlin file itself is not compiled or unit-tested** — no Kotlin
-  toolchain was available when this was written, even though the Python/
-  ONNX side it depends on has been. Every non-ASCII character was verified
-  codepoint-by-codepoint against the Python source with a Python script
-  (stdlib only) rather than trusted by eye, but that is not a substitute
-  for `kotlinc` + real test strings. Before this can run on-device: add the
-  `onnxruntime-android` + `onnxruntime-extensions-android` Gradle
-  dependencies, compile, and run it against real STT output for each
-  language, including a round-trip preprocess → postprocess identity check.
+- **Compiled and smoke-tested (see above), but not run on-device.** The
+  pure-logic paths are verified; `OnnxMtAdapter`'s actual ONNX session
+  calls still need a real Android device/emulator (no desktop-Linux native
+  build of `onnxruntime-extensions` exists to test against here). Before
+  shipping: run it against real STT output for each language on-device,
+  including a round-trip preprocess → postprocess identity check.
 
 ## Where this belongs once the Android module exists
 
