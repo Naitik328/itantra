@@ -116,6 +116,33 @@ never calls it that way — Bengali has no STT (spec §3.4), so `bn` only
 ever appears as a target in production. Useful for testing the model in
 isolation regardless.
 
+## Can't type Devanagari/Telugu/Bengali into your terminal?
+
+Most terminal setups have no IME for these scripts, so typing `hi`/`te`/
+`bn` source text directly at the `text to translate:` prompt often isn't
+possible. Two ways around it:
+
+- **Paste** — a terminal accepts pasted UTF-8 text fine even with no IME
+  configured; typing is the limitation, not receiving it. Copy real
+  sentences out of `tools/test_sentences/*.tsv` or anywhere else with
+  real Unicode text.
+- **`--batch FILE`** — skips the interactive prompts entirely. Put
+  `srcLang<TAB>tgtLang<TAB>text` lines in a file (edit it in a normal
+  text editor, or paste into one — both handle Unicode input far better
+  than a bare terminal), then:
+  ```bash
+  ./translate_cli --model-root ... --extensions-lib ... --batch example_batch.tsv
+  ```
+  `example_batch.tsv` in this directory is a ready-to-run sample covering
+  all six non-Bengali pairs, including the two-hop `hi↔te` chains.
+  Output for each line:
+  ```
+  [hi->te] अस्पताल कहाँ है?
+    -> ఆసుపత్రి ఎక్కడ ఉంది ?
+  ```
+  Blank lines and lines starting with `#` are skipped, same convention as
+  `tools/test_sentences/*.tsv`.
+
 ## If it fails
 
 - **`undefined symbol: PyInstanceMethod_Type`** — you used the pip

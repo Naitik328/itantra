@@ -1,0 +1,10 @@
+# srcLang<TAB>tgtLang<TAB>text -- edit this in a normal text editor (or
+# paste into it), then run: ./translate_cli --model-root ... --extensions-lib ... --batch example_batch.tsv
+# Typing Devanagari/Telugu/Bengali into a live terminal prompt usually
+# needs an IME most setups don't have; editing a UTF-8 file doesn't.
+en	hi	Where is the nearest hospital?
+en	te	Please send help immediately.
+hi	en	अस्पताल कहाँ है?
+te	en	సమీప ఆసుపత్రి ఎక్కడ ఉంది?
+hi	te	अस्पताल कहाँ है?
+te	hi	సమీప ఆసుపత్రి ఎక్కడ ఉంది?

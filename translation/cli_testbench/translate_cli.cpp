@@ -385,23 +385,89 @@ static void printLanguages() {
   std::cout << "is never called that way in production.\n";
 }
 
+// Splits on a single tab character -- deliberately not a general CSV/TSV
+// parser, matching tools/test_sentences/*.tsv's own format.
+static std::vector<std::string> splitTabs(const std::string &line) {
+  std::vector<std::string> parts;
+  size_t start = 0;
+  size_t pos;
+  while ((pos = line.find('\t', start)) != std::string::npos) {
+    parts.push_back(line.substr(start, pos - start));
+    start = pos + 1;
+  }
+  parts.push_back(line.substr(start));
+  return parts;
+}
+
+// Batch mode: reads "srcLang<TAB>tgtLang<TAB>text" lines from a file and
+// translates each, no interactive typing required. Exists because typing
+// Devanagari/Telugu/Bengali directly into a terminal generally needs an
+// IME most setups don't have configured -- editing a UTF-8 text file in a
+// normal text editor (or pasting into one) doesn't have that problem.
+// Blank lines and lines starting with '#' are skipped, same convention as
+// tools/test_sentences/*.tsv.
+static int runBatch(MtEngine &engine, const std::string &batchFile) {
+  std::ifstream f(batchFile);
+  if (!f) {
+    std::cerr << "Cannot open " << batchFile << "\n";
+    return 1;
+  }
+  std::string line;
+  int lineNo = 0;
+  int failures = 0;
+  while (std::getline(f, line)) {
+    lineNo++;
+    if (line.empty() || line[0] == '#') continue;
+    auto parts = splitTabs(line);
+    if (parts.size() != 3) {
+      std::cout << "line " << lineNo << ": expected 'srcLang<TAB>tgtLang<TAB>text', got " << parts.size() << " field(s) -- skipping\n";
+      failures++;
+      continue;
+    }
+    const std::string &srcLang = parts[0];
+    const std::string &tgtLang = parts[1];
+    const std::string &text = parts[2];
+    if (!kFloresTag.count(srcLang) || !kFloresTag.count(tgtLang)) {
+      std::cout << "line " << lineNo << ": unknown language code in '" << srcLang << "'/'" << tgtLang << "' -- skipping\n";
+      failures++;
+      continue;
+    }
+    try {
+      std::string result = engine.translate(text, srcLang, tgtLang);
+      std::cout << "[" << srcLang << "->" << tgtLang << "] " << text << "\n  -> " << result << "\n\n";
+    } catch (const std::exception &e) {
+      std::cout << "line " << lineNo << ": ERROR: " << e.what() << "\n\n";
+      failures++;
+    }
+  }
+  return failures > 0 ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
   std::string modelRoot;
   std::string extensionsLibPath;
+  std::string batchFile;
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
     if (arg == "--model-root" && i + 1 < argc) {
       modelRoot = argv[++i];
     } else if (arg == "--extensions-lib" && i + 1 < argc) {
       extensionsLibPath = argv[++i];
+    } else if (arg == "--batch" && i + 1 < argc) {
+      batchFile = argv[++i];
     } else if (arg == "--help" || arg == "-h") {
-      std::cout << "Usage: translate_cli --model-root DIR --extensions-lib PATH\n"
+      std::cout << "Usage: translate_cli --model-root DIR --extensions-lib PATH [--batch FILE]\n"
                    "  --model-root DIR      Directory containing en-indic/ and indic-en/\n"
                    "                        (each with encoder.int8.onnx, decoder.int8.onnx,\n"
                    "                        vocab_ids.json, tgt_vocab.json)\n"
                    "  --extensions-lib PATH Path to onnxruntime_extensions' native library\n"
-                   "                        (get_library_path() in Python, or the .so found\n"
-                   "                        under a pip install of onnxruntime_extensions)\n";
+                   "                        (the standalone NuGet build -- see README.md,\n"
+                   "                        NOT the pip-installed Python wheel's .so)\n"
+                   "  --batch FILE          Read 'srcLang<TAB>tgtLang<TAB>text' lines from FILE\n"
+                   "                        instead of prompting interactively -- for when you\n"
+                   "                        can't type Devanagari/Telugu/Bengali directly into\n"
+                   "                        a terminal. Edit FILE in a normal text editor\n"
+                   "                        (or paste into it) instead.\n";
       return 0;
     }
   }
@@ -412,10 +478,15 @@ int main(int argc, char **argv) {
 
   MtEngine engine(modelRoot, extensionsLibPath);
 
+  if (!batchFile.empty()) {
+    return runBatch(engine, batchFile);
+  }
+
   std::cout << "iTantra MT CLI test bench\n";
   std::cout << "model-root: " << modelRoot << "\n";
   printLanguages();
-  std::cout << "Type 'quit' at any prompt to exit.\n\n";
+  std::cout << "Type 'quit' at any prompt to exit. Can't type Devanagari/Telugu/\n";
+  std::cout << "Bengali directly? Use --batch FILE instead (see --help).\n\n";
 
   while (true) {
     std::string srcLang, tgtLang, text;
