@@ -23,9 +23,16 @@ import java.nio.LongBuffer
  * as a blocking gap (no first-party Android SentencePiece binding); that
  * file and interface no longer exist. What this adapter needs from Android
  * is the `onnxruntime-extensions-android` AAR, loaded as a custom-op
- * library via [OrtxPackage.getLibraryPath] -- import path and exact API
- * not verified against the real AAR (no Kotlin toolchain available); the
- * ONNX/Python side of this design IS verified -- see below.
+ * library via [OrtxPackage.getLibraryPath] -- confirmed against the real
+ * AAR's classes.jar via `javap` (not guessed), and since confirmed by a
+ * collaborator's real-device integration attempt: `registerCustomOpLibrary()`
+ * + `getLibraryPath()` both execute without error on real hardware, and
+ * the library's native `.so`s declare no `libonnxruntime.so` dependency at
+ * all (`llvm-objdump`'d directly) -- it's fully decoupled from whichever
+ * ONNX Runtime build is present, which matters a lot if this ever shares
+ * a process with sherpa-onnx's own bundled runtime (see
+ * translation/TRANSLATION_INTEGRATION_ISSUES.md #1 for a real version-
+ * symbol collision that *did* bite in exactly that scenario, and its fix).
  *
  * Everything about the encoder input/decoder-seed/detokenize shapes below
  * was confirmed 2026-09-03 against the real tokenization_indictrans.py,

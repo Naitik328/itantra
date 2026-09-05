@@ -21,6 +21,39 @@ See `translation/translation_state.md` for the full history and exactly
 what's verified vs. not; `translation/README.md` for the `IndicProcessor`/
 `OnnxMtAdapter` design details.
 
+## ⚠ Known blocker if merging MT alongside sherpa-onnx (real STT/TTS)
+
+A collaborator's first real integration attempt hit this and lost time to
+it — read before you do, not after. Full write-up, diagnosis, and fix in
+`translation/TRANSLATION_INTEGRATION_ISSUES.md` §1; summary:
+
+**`sherpa-onnx-*.aar` bundles its own `libonnxruntime.so`, built by k2-fsa
+against a different ONNX Runtime version than the official
+`onnxruntime-android` artifact this MT module needs.** Both files share
+the exact name `libonnxruntime.so`; Gradle's `pickFirst` will silently
+keep one and discard the other, and whichever one loses fails at
+`dlopen` time with *"cannot locate symbol OrtGetApiBase version
+VERS_1.27.x"* — deterministic, every time, not intermittent. This only
+shows up once MT and sherpa-onnx (STT/TTS) are both linked into the same
+app — the standalone `android_smoketest` harness in this repo never hits
+it, because it has no sherpa-onnx dependency at all.
+
+**The fix that worked:** rename sherpa's bundled runtime (not the
+official one) via `patchelf`, and repoint the `DT_NEEDED` entries in its
+three consumer libraries across all four ABIs, so each `.so` resolves to
+the runtime it actually needs. Do this to sherpa's side, not ORT's side —
+ORT's own Java loader calls `System.loadLibrary("onnxruntime")` by literal
+name and breaks if renamed; sherpa only reaches its runtime through
+`DT_NEEDED`, which a linker-level rename transparently follows. Costs
+~40 MB of duplicated ONNX Runtime in the APK, and needs re-running on
+every future sherpa-onnx upgrade.
+
+`onnxruntime-extensions-android` (the tokenizer custom-op library this MT
+module also needs) is **not** part of this problem — confirmed
+independently (§2 of the same issues log) that its native libraries
+declare no dependency on `libonnxruntime.so` at all and load regardless
+of which ORT build wins the collision above.
+
 ---
 
 ## 1. Read first
@@ -32,6 +65,7 @@ what's verified vs. not; `translation/README.md` for the `IndicProcessor`/
 | `translation/translation_state.md` | Current status, what's verified, what's not, full history |
 | `translation/README.md` | Deep-dive on `IndicProcessor`/`OnnxMtAdapter` — what's proven vs. assumed |
 | `translation/android_smoketest/README.md` | Exact steps to build and run the MT-only on-device test |
+| `translation/TRANSLATION_INTEGRATION_ISSUES.md` | Real issues hit merging this into an actual app with sherpa-onnx STT/TTS present — read this before merging, not after hitting the same wall |
 
 ## 2. MT source code
 

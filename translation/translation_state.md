@@ -345,12 +345,19 @@ a clean `verify_tokenizer_ids()` pass against real weights.**
 
 ## What's left
 
-1. **Run the on-device smoke test.** `translation/android_smoketest/` is
-   built (Gradle module, instrumented test, push script) but not run — no
-   Android SDK/emulator/device was available in the environment it was
-   written in. This is the single biggest remaining untested surface:
-   `OnnxMtAdapter`'s actual ONNX session calls (encoder/decoder/tokenizer
-   custom-op), never exercised through a real Android native library.
+1. **Get a real translate() call running on-device.** Partial progress —
+   see `translation/TRANSLATION_INTEGRATION_ISSUES.md` for the full log
+   from a collaborator's real integration attempt. **Confirmed on real
+   hardware:** the sherpa-onnx/ORT native-library coexistence problem
+   (issue #1, fixed) and `onnxruntime-extensions` loading + registering
+   independent of ORT version (issue #2). **Still blocked:** the actual
+   model files that reached the collaborator's machine were corrupted in
+   transit (issue #4) — re-verified the source files on this end and they
+   pass checksum + load correctly, so this is a transfer problem, not a
+   re-export; needs a clean re-transfer, verified with
+   `sha256sum -c SHA256SUMS.txt` on both ends before trusting a copy.
+   `push_models.sh` now verifies before pushing and fixes the mode-770
+   directory permission issue (issue #3) automatically.
 2. ~~Export `te`/`bn` the same way~~ — **done, see below.** All five
    language pairs the app actually uses (hi↔en, te↔en, en→bn) now have
    curated test files and a clean `verify_tokenizer_ids()` pass.
@@ -492,3 +499,34 @@ Hindi/English STT/TTS already work.
   `hi_IN-female-medium.onnx` — possibly just a rename since, but a real
   model/config mismatch fails silently (CLAUDE.md #4.7), so it's called
   out rather than glossed over.
+- **2026-09-03** — A collaborator's real integration attempt (merging MT
+  into the actual app alongside sherpa-onnx STT/TTS, not just the
+  standalone `android_smoketest` harness) surfaced real findings, logged
+  in `translation/TRANSLATION_INTEGRATION_ISSUES.md`:
+  - **Confirmed on real hardware, resolving two things this doc used to
+    flag as unverified:** `OrtxPackage.getLibraryPath()` +
+    `registerCustomOpLibrary()` both work, and `onnxruntime-extensions`'
+    native libraries are fully decoupled from whichever ONNX Runtime
+    build is present (no `libonnxruntime.so` dependency at all).
+  - **A real architectural blocker found and fixed:** sherpa-onnx bundles
+    its own `libonnxruntime.so` at a different version than
+    `onnxruntime-android`, both named identically — Gradle's `pickFirst`
+    can't resolve this, only one survives, and native symbol-version
+    resolution fails deterministically for whichever one loses. Fixed via
+    `patchelf`-renaming sherpa's copy and repointing its consumers'
+    `DT_NEEDED` entries. Only relevant once MT and sherpa-onnx share a
+    process — added a prominent warning to `simulator_setup.md` so the
+    next person doesn't lose time rediscovering this.
+  - **A real corruption**, not yet resolved: all four `.onnx` model files
+    that reached the collaborator's machine fail their own
+    `SHA256SUMS.txt` and fail to parse (`ORT_INVALID_PROTOBUF`). Re-
+    verified the source files on this end — checksums pass and they load
+    correctly through `onnxruntime` + `onnxruntime_extensions` right now
+    — so this is a transfer-corruption problem, not a bad export. Needs a
+    clean re-transfer with checksums verified on both ends.
+  - Fixed `push_models.sh` to match: verifies `SHA256SUMS.txt` before
+    pushing (catches exactly the corruption above before it reaches a
+    device) and `chmod 777`s the pushed directories afterward (adb's
+    default mode 770 silently blocks the app's own uid from reading what
+    it just received — CLAUDE.md's "silent failure" pattern showing up in
+    a new place).
