@@ -386,52 +386,125 @@ Gradle build, an Android device, or a JVM — useful for quick sanity
 checks while iterating on anything upstream (a new export, a tokenizer
 change) before reaching for the slower `android_smoketest` path.
 
+### Real integration succeeded, two real issues found (2026-09-05)
+
+A collaborator got the **full app** (STT + TTS + MT together, branch
+`kotlin_app_wifidirect`, package `com.sih.itantra`) building, installing,
+and actually translating on a real device — see `translation/APP_SIZE.md`.
+Confirms the `~436 MB` MT bundle size decision exactly, and the earlier
+model-corruption blocker (`TRANSLATION_INTEGRATION_ISSUES.md` #4) is
+resolved (a real translation ran: native heap hit 334 MB while
+translating). Two real problems surfaced:
+
+#### Issue A: proper nouns / names sometimes mistranslate or mispronounce badly
+
+Not yet diagnosed — this could originate in STT (English STT already
+known to garble Indian proper nouns, CLAUDE.md #8; lexicon repair, spec
+#7.2.1, explicitly does **not** cover personal names), in MT (NMT models
+are well known to hallucinate on rare/OOV tokens like names — a name can
+get "translated" into an unrelated real word instead of preserved), or in
+TTS (a foreign/rare word the voice model wasn't trained on). These have
+different fixes. Needs concrete repro examples (exact input, expected
+output, actual output, which language pair, which stage's output already
+looks wrong) before proposing anything — not diagnosable from a
+description alone. One real option once diagnosed as an MT-stage problem:
+extend `Placeholders.kt`'s existing do-not-translate wrapping (already
+used for URLs/emails/numbers) to detected names, so MT never attempts to
+translate them at all — but names aren't pattern-detectable the way an
+email address is, so this needs a real detection source (typed entry, a
+contacts list), matching what spec #7.2.1 already concluded for the
+STT-side version of this same problem.
+
+#### Issue B: MT adds ~1.5s of latency to the STT/TTS round trip (was ~1s, now ~2.5s)
+
+Investigated immediately with real measurements, not guessed at. Added
+`--time`/`--num-threads` to `translation/cli_testbench/translate_cli.cpp`
+and measured real per-stage cost on desktop against the real models:
+
+| Stage | Desktop time |
+|---|---|
+| Model load (per direction, first use only) | 782–1051 ms |
+| Encoder (tokenize + encode) | 4–7 ms |
+| **Decode loop (5–8 output tokens)** | **85–391 ms** |
+| Detokenize | 0 ms |
+
+The decode loop is already disproportionately expensive for tiny outputs
+on a fast x86 desktop — the no-KV-cache design
+(`export_indictrans2_onnx.py`'s own documented tradeoff, flagged from the
+start as something to revisit "if on-device benchmarking shows this is
+actually too slow") recomputes the full prefix every step. A phone's ARM
+CPU is typically far slower per-op (spec's own performance table
+estimates 10–20x slower than desktop for STT/TTS); if MT scales
+similarly, this alone could plausibly account for the full ~1.5s.
+
+**Model load (780–1050ms) is the other real suspect**, but a *different*
+problem needing a *different* fix: cheap if a model stays resident across
+a conversation, expensive if residency logic reloads it on every message.
+**Not yet known which one dominates** — needs one fact: was the 2.5s
+measured on the first message of a session, or steady-state after models
+were already warmed up? Added the same opt-in stage timing directly to
+`OnnxMtAdapter.kt` (a nullable `onTiming` callback, zero cost if unused)
+so the next real-device test run can answer this definitively instead of
+guessing further. Whoever wires up the real `Orchestrator` should pass a
+callback like `{ stage, ms -> Log.d("MT_TIMING", "$stage: ${ms}ms") }` for
+one test run.
+
+**Not yet decided:** the actual fix. A confirmed decode-loop bottleneck
+points at needing real KV-cache support in the decoder export (the
+`export_indictrans2_onnx.py` tradeoff explicitly deferred, not revisited
+yet) — real engineering effort, re-exporting the decoder and rewriting
+the greedy-decode loop in three places (Python reference, Kotlin adapter,
+C++ CLI) to stay in lockstep. A confirmed reload-on-every-message problem
+would be much cheaper to fix (keep both directions resident, or raise the
+idle timeout). Don't build either until the diagnostic above says which.
+
 ---
 
 ## What's left
 
-1. **Get a real translate() call running on-device.** Partial progress —
-   see `translation/TRANSLATION_INTEGRATION_ISSUES.md` for the full log
-   from a collaborator's real integration attempt. **Confirmed on real
-   hardware:** the sherpa-onnx/ORT native-library coexistence problem
-   (issue #1, fixed) and `onnxruntime-extensions` loading + registering
-   independent of ORT version (issue #2). **Still blocked:** the actual
-   model files that reached the collaborator's machine were corrupted in
-   transit (issue #4) — re-verified the source files on this end and they
-   pass checksum + load correctly, so this is a transfer problem, not a
-   re-export; needs a clean re-transfer, verified with
-   `sha256sum -c SHA256SUMS.txt` on both ends before trusting a copy.
-   `push_models.sh` now verifies before pushing and fixes the mode-770
-   directory permission issue (issue #3) automatically.
-2. ~~Export `te`/`bn` the same way~~ — **done, see below.** All five
+1. **Diagnose and fix the ~1.5s MT latency (Issue B above).** Real
+   desktop numbers point at the no-KV-cache decode loop; needs one
+   confirming fact (cold vs. steady-state) from a real device run with
+   `OnnxMtAdapter`'s new `onTiming` callback wired to `Log.d` before
+   committing to a fix.
+2. **Diagnose the proper-noun/name mistranslation problem (Issue A
+   above).** Needs concrete repro examples (exact input/expected/actual,
+   language pair) before anything can be proposed — could be an STT, MT,
+   or TTS problem, each with a different fix.
+3. ~~Get a real translate() call running on-device~~ — **done.** A
+   collaborator's real integration (`translation/TRANSLATION_INTEGRATION_
+   ISSUES.md`, `translation/APP_SIZE.md`) confirmed the sherpa-onnx/ORT
+   coexistence fix (issue #1), `onnxruntime-extensions` version-
+   independence (issue #2), the mode-770 permission fix (issue #3), and —
+   after a clean re-transfer resolved the corrupted-files blocker (issue
+   #4) — a real translation actually running on-device (native heap hit
+   334 MB while translating).
+4. ~~Export `te`/`bn` the same way~~ — **done, see below.** All five
    language pairs the app actually uses (hi↔en, te↔en, en→bn) now have
    curated test files and a clean `verify_tokenizer_ids()` pass.
-3. **Merge into the real app module.** This branch (`translation-mt`)
-   deliberately never had an `app/` — the real UI/transport scaffold
-   (Wi-Fi Direct, wire protocol, screens) lives on `ai_abhi`/`ai_raj` and
-   was never merged with this MT work. `translation/android_smoketest/`
-   is a deliberately separate, minimal harness for exactly this reason —
-   it answers "does the MT module run on Android" without waiting on a
-   branch merge. The real integration (this code moving into
-   `android/app/src/main/kotlin/com/itantra/...` per each file's own "where
-   this belongs" note, `ModelStore` download wiring, D1) is still ahead.
-4. **`ModelLifecycle`** (spec §6.2 full tiered residency across STT/MT/TTS,
+5. ~~Merge into the real app module~~ — **done**, on branch
+   `kotlin_app_wifidirect` (package `com.sih.itantra`), not merged back
+   into `translation-mt` itself. `translation/android_smoketest/` remains
+   useful as a smaller, faster-to-iterate harness for MT-only changes.
+6. **`ModelLifecycle`** (spec §6.2 full tiered residency across STT/MT/TTS,
    not just `OnnxMtAdapter`'s own `evictIdle()`) — blocked on D3
    (docs/CLAUDE.md §2). `Orchestrator.evictIdleModels()` forwards to what
    `OnnxMtAdapter` already does for itself; a real `ModelLifecycle` that
-   also manages STT/TTS residency is separate, unbuilt work.
-5. **Real `SttAdapter`/`TtsAdapter` implementations** — only interfaces
-   exist here (spec §7.1, copied verbatim). The real sherpa-onnx-backed
-   ones are Shivanshu's/Raj's areas and live outside this branch; wiring
-   them into `Orchestrator`'s constructor is what turns the smoke-tested
-   fake-adapter pipeline into a real one.
-6. **Real-device performance measurement** (RTF/RAM, spec §3.2, D3) —
-   distinct from item 1's correctness check: even once the smoke test
-   passes, everything so far has only run on a desktop CPU with full RAM.
-   Real phone RTF/RAM is still unmeasured — that's D3's whole point, and
-   the actual blocker on §6.2's tiered-residency decision.
-7. **Feed the real MT sizes back to the team** for the D1 packaging
-   decision (spec §2.1/§2.3) — this doc has the numbers; the spec file
+   also manages STT/TTS residency is separate, unbuilt work. Directly
+   relevant to item 1's latency investigation if the culprit turns out to
+   be reload-on-every-message rather than the decode loop.
+7. **Real `SttAdapter`/`TtsAdapter` implementations** in this branch's own
+   `Orchestrator` — only interfaces exist here (spec §7.1, copied
+   verbatim); the real ones now exist on `kotlin_app_wifidirect` instead,
+   not wired back into this branch's `Orchestrator.kt`.
+8. **Real-device performance measurement** (RTF/RAM, spec §3.2, D3) —
+   partially answered by items 1's investigation and `APP_SIZE.md`'s
+   runtime-memory numbers (334 MB translating / 12 MB idle), but the
+   broader STT+TTS+MT RAM budget across a full conversation is still
+   D3's open point.
+9. **Feed the real MT sizes back to the team** for the D1 packaging
+   decision (spec §2.1/§2.3) — `APP_SIZE.md` now has real installed-size
+   numbers (≈1.03 GB) superseding this doc's own estimate; the spec file
    itself needs team sign-off to edit.
 
 ---
@@ -584,3 +657,16 @@ Hindi/English STT/TTS already work.
   CPython extension module that fails to load in a plain C++ process;
   the NuGet package's `libortextensions.so` is the actual standalone
   build that works.
+- **2026-09-05** — A collaborator's real integration succeeded: full app
+  (STT+TTS+MT) built and ran on-device, branch `kotlin_app_wifidirect`
+  (`translation/APP_SIZE.md`). Two real issues surfaced: (a) proper
+  nouns/names sometimes mistranslate or mispronounce badly — not yet
+  diagnosed, needs repro examples; (b) MT adds ~1.5s of round-trip
+  latency. Investigated (b) immediately: added `--time`/`--num-threads`
+  to the C++ CLI and measured real desktop numbers — decode loop costs
+  85–391ms for just 5–8 tokens with no KV cache, model load costs
+  780–1050ms per direction on first use. Added matching opt-in stage
+  timing to `OnnxMtAdapter.kt` (`onTiming` callback, zero cost unused) so
+  a real device run can confirm whether the decode loop or a reload-per-
+  message residency problem dominates before committing to a fix for
+  either.

@@ -28,6 +28,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
@@ -37,6 +38,29 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
+// Lightweight stage timing -- added specifically to investigate a real
+// on-device latency report (~1.5s added by MT, per
+// translation/TRANSLATION_INTEGRATION_ISSUES.md). Desktop timing doesn't
+// map 1:1 to phone timing, but which STAGE dominates almost certainly
+// does (it's an algorithmic-complexity question -- no KV cache means the
+// decode loop recomputes the full prefix every step, see
+// export_indictrans2_onnx.py's module doc -- not a hardware-specific one).
+// Enabled with --time; silent otherwise.
+static bool g_timingEnabled = false;
+class Stopwatch {
+ public:
+  explicit Stopwatch(std::string label) : label_(std::move(label)), start_(std::chrono::steady_clock::now()) {}
+  ~Stopwatch() {
+    if (!g_timingEnabled) return;
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_).count();
+    std::cerr << "  [time] " << label_ << ": " << ms << " ms\n";
+  }
+
+ private:
+  std::string label_;
+  std::chrono::steady_clock::time_point start_;
+};
 
 using json = nlohmann::json;
 
@@ -235,10 +259,11 @@ struct DirectionSession {
 
 class MtEngine {
  public:
-  MtEngine(std::string modelRoot, std::string extensionsLibPath)
+  MtEngine(std::string modelRoot, std::string extensionsLibPath, int numThreads = 4)
       : env_(ORT_LOGGING_LEVEL_WARNING, "itantra-mt-cli"),
         modelRoot_(std::move(modelRoot)),
-        extensionsLibPath_(std::move(extensionsLibPath)) {}
+        extensionsLibPath_(std::move(extensionsLibPath)),
+        numThreads_(numThreads) {}
 
   // Full pivot-chaining translate -- mirrors Orchestrator's routing:
   // same language is a no-op, one side "en" is a single MT hop, anything
@@ -256,15 +281,17 @@ class MtEngine {
   Ort::Env env_;
   std::string modelRoot_;
   std::string extensionsLibPath_;
+  int numThreads_;
   std::map<std::string, DirectionSession> sessions_;
 
   DirectionSession &sessionFor(const std::string &direction) {
     auto it = sessions_.find(direction);
     if (it != sessions_.end()) return it->second;
 
+    Stopwatch sw("model load (" + direction + ", first use only)");
     Ort::SessionOptions opts;
     opts.RegisterCustomOpsLibrary(extensionsLibPath_.c_str());
-    opts.SetIntraOpNumThreads(4);  // spec #6.3 -- shared numThreads, not per-language
+    opts.SetIntraOpNumThreads(numThreads_);  // spec #6.3 -- shared numThreads, not per-language
 
     DirectionSession sess;
     std::string dir = modelRoot_ + "/" + direction;
@@ -315,7 +342,11 @@ class MtEngine {
     Ort::Value encInputs[] = {std::move(textTensor), std::move(srcTagTensor), std::move(tgtTagTensor), std::move(eosTensor)};
     const char *encOutputNames[] = {"encoder_hidden_states"};
 
-    auto encOutputs = sess.encoder->Run(Ort::RunOptions{nullptr}, encInputNames, encInputs, 4, encOutputNames, 1);
+    std::vector<Ort::Value> encOutputs;
+    {
+      Stopwatch sw("encoder.Run() (tokenize + encode, src_len=" + std::to_string(pivotedText.size()) + " bytes)");
+      encOutputs = sess.encoder->Run(Ort::RunOptions{nullptr}, encInputNames, encInputs, 4, encOutputNames, 1);
+    }
     Ort::Value &hiddenStates = encOutputs[0];
     auto hiddenShape = hiddenStates.GetTensorTypeAndShapeInfo().GetShape();  // [1, srcLen, hidden]
     int64_t srcLen = hiddenShape[1];
@@ -337,41 +368,58 @@ class MtEngine {
     const char *decInputNames[] = {"decoder_input_ids", "encoder_hidden_states", "encoder_attention_mask"};
     const char *decOutputNames[] = {"logits"};
 
-    for (int step = 0; step < kMaxNewTokens; step++) {
-      int64_t curLen = static_cast<int64_t>(decoderIds.size());
-      int64_t idsShape[] = {1, curLen};
-      Ort::Value idsTensor = Ort::Value::CreateTensor<int64_t>(memInfo, decoderIds.data(), decoderIds.size(), idsShape, 2);
+    int stepsRun = 0;
+    {
+      // One Stopwatch for the WHOLE loop, not per-step -- per-step timing
+      // would itself confirm/refute the no-KV-cache hypothesis (each step
+      // should take measurably longer than the last, since it reprocesses
+      // a longer prefix), but that's a lot of stderr noise for routine use.
+      // Uncomment the per-step Stopwatch below if you need that detail.
+      Stopwatch sw("decode loop total");
+      for (int step = 0; step < kMaxNewTokens; step++) {
+        // Stopwatch stepSw("  decode step " + std::to_string(step) + " (prefix_len=" + std::to_string(decoderIds.size()) + ")");
+        int64_t curLen = static_cast<int64_t>(decoderIds.size());
+        int64_t idsShape[] = {1, curLen};
+        Ort::Value idsTensor = Ort::Value::CreateTensor<int64_t>(memInfo, decoderIds.data(), decoderIds.size(), idsShape, 2);
 
-      Ort::Value decInputs[] = {std::move(idsTensor), std::move(hiddenStates), std::move(maskTensor)};
-      auto decOutputs = sess.decoder->Run(Ort::RunOptions{nullptr}, decInputNames, decInputs, 3, decOutputNames, 1);
+        Ort::Value decInputs[] = {std::move(idsTensor), std::move(hiddenStates), std::move(maskTensor)};
+        auto decOutputs = sess.decoder->Run(Ort::RunOptions{nullptr}, decInputNames, decInputs, 3, decOutputNames, 1);
 
-      // Ort::Run moves our Values into itself for the call but returns them
-      // via move semantics on Value -- reclaim hiddenStates/maskTensor so
-      // they can be reused next iteration (they're passed in decInputs by
-      // reference to Run, which doesn't take ownership; std::move above is
-      // just to satisfy the array-of-Value construction, not a real
-      // ownership transfer for a raw C API call underneath).
-      hiddenStates = std::move(decInputs[1]);
-      maskTensor = std::move(decInputs[2]);
+        // Ort::Run moves our Values into itself for the call but returns them
+        // via move semantics on Value -- reclaim hiddenStates/maskTensor so
+        // they can be reused next iteration (they're passed in decInputs by
+        // reference to Run, which doesn't take ownership; std::move above is
+        // just to satisfy the array-of-Value construction, not a real
+        // ownership transfer for a raw C API call underneath).
+        hiddenStates = std::move(decInputs[1]);
+        maskTensor = std::move(decInputs[2]);
 
-      auto logitsShape = decOutputs[0].GetTensorTypeAndShapeInfo().GetShape();  // [1, curLen, vocab]
-      int64_t vocabSize = logitsShape[2];
-      const float *logits = decOutputs[0].GetTensorData<float>();
-      const float *lastStep = logits + (curLen - 1) * vocabSize;
-      int64_t bestId = 0;
-      float bestScore = lastStep[0];
-      for (int64_t v = 1; v < vocabSize; v++) {
-        if (lastStep[v] > bestScore) {
-          bestScore = lastStep[v];
-          bestId = v;
+        auto logitsShape = decOutputs[0].GetTensorTypeAndShapeInfo().GetShape();  // [1, curLen, vocab]
+        int64_t vocabSize = logitsShape[2];
+        const float *logits = decOutputs[0].GetTensorData<float>();
+        const float *lastStep = logits + (curLen - 1) * vocabSize;
+        int64_t bestId = 0;
+        float bestScore = lastStep[0];
+        for (int64_t v = 1; v < vocabSize; v++) {
+          if (lastStep[v] > bestScore) {
+            bestScore = lastStep[v];
+            bestId = v;
+          }
         }
+        decoderIds.push_back(bestId);
+        stepsRun++;
+        if (bestId == eosId) break;
       }
-      decoderIds.push_back(bestId);
-      if (bestId == eosId) break;
     }
+    if (g_timingEnabled) std::cerr << "  [time] (" << stepsRun << " decode steps ran)\n";
 
-    std::string decoded = detokenize(sess.tgtVocab, decoderIds, eosId);
-    return transliterate(decoded, "hi", tgtLang);
+    std::string decoded;
+    {
+      Stopwatch sw("detokenize + transliterate");
+      decoded = detokenize(sess.tgtVocab, decoderIds, eosId);
+      decoded = transliterate(decoded, "hi", tgtLang);
+    }
+    return decoded;
   }
 };
 
@@ -447,6 +495,8 @@ int main(int argc, char **argv) {
   std::string modelRoot;
   std::string extensionsLibPath;
   std::string batchFile;
+  int numThreads = 4;  // spec #6.3's default -- override with --num-threads to test the
+                       // "big.LITTLE scheduling may favor 2" caveat spec #6.3 itself flags
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
     if (arg == "--model-root" && i + 1 < argc) {
@@ -455,14 +505,23 @@ int main(int argc, char **argv) {
       extensionsLibPath = argv[++i];
     } else if (arg == "--batch" && i + 1 < argc) {
       batchFile = argv[++i];
+    } else if (arg == "--num-threads" && i + 1 < argc) {
+      numThreads = std::stoi(argv[++i]);
+    } else if (arg == "--time") {
+      g_timingEnabled = true;
     } else if (arg == "--help" || arg == "-h") {
-      std::cout << "Usage: translate_cli --model-root DIR --extensions-lib PATH [--batch FILE]\n"
+      std::cout << "Usage: translate_cli --model-root DIR --extensions-lib PATH [--batch FILE] [--time] [--num-threads N]\n"
                    "  --model-root DIR      Directory containing en-indic/ and indic-en/\n"
                    "                        (each with encoder.int8.onnx, decoder.int8.onnx,\n"
                    "                        vocab_ids.json, tgt_vocab.json)\n"
                    "  --extensions-lib PATH Path to onnxruntime_extensions' native library\n"
                    "                        (the standalone NuGet build -- see README.md,\n"
                    "                        NOT the pip-installed Python wheel's .so)\n"
+                   "  --time                Print per-stage timing (model load / encoder /\n"
+                   "                        decode loop / detokenize) to stderr for each\n"
+                   "                        translation -- for investigating latency.\n"
+                   "  --num-threads N       ONNX Runtime intra-op thread count (default 4,\n"
+                   "                        spec #6.3's default -- try smaller values too).\n"
                    "  --batch FILE          Read 'srcLang<TAB>tgtLang<TAB>text' lines from FILE\n"
                    "                        instead of prompting interactively -- for when you\n"
                    "                        can't type Devanagari/Telugu/Bengali directly into\n"
@@ -476,7 +535,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  MtEngine engine(modelRoot, extensionsLibPath);
+  MtEngine engine(modelRoot, extensionsLibPath, numThreads);
 
   if (!batchFile.empty()) {
     return runBatch(engine, batchFile);

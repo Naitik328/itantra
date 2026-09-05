@@ -85,7 +85,28 @@ class OnnxMtAdapter(
     private val numThreads: Int = 4, // spec #6.3 -- shared numThreads, not a per-language value
     private val maxNewTokens: Int = 128, // spec #7.4 -- chat messages are short
     private val idleTimeoutMillis: Long = 30_000, // spec #6.2 tiered residency
+    // Opt-in stage timing (model load / encoder / decode loop / detokenize),
+    // null by default -- no cost, no Log dependency, when not supplied.
+    // Added to investigate a real on-device report of MT adding ~1.5s of
+    // latency to the STT/TTS round trip (translation/TRANSLATION_INTEGRATION_
+    // ISSUES.md). Desktop timing via the C++ CLI test bench
+    // (translation/cli_testbench/) already shows the decode loop costing
+    // 85-391ms for just 5-8 output tokens on a fast x86 desktop with no KV
+    // cache (export_indictrans2_onnx.py's module doc flagged this exact
+    // tradeoff as something to revisit "if on-device benchmarking shows
+    // this is actually too slow" -- this is that benchmarking, on-device).
+    // Wire this to Log.d/your telemetry of choice; a caller not supplying
+    // it pays nothing extra.
+    private val onTiming: ((stage: String, durationMs: Long) -> Unit)? = null,
 ) : MtAdapter {
+
+    private inline fun <T> timed(stage: String, block: () -> T): T {
+        if (onTiming == null) return block()
+        val start = System.nanoTime()
+        val result = block()
+        onTiming.invoke(stage, (System.nanoTime() - start) / 1_000_000)
+        return result
+    }
 
     private data class VocabIds(
         val decoderStartId: Int,
@@ -132,9 +153,14 @@ class OnnxMtAdapter(
             ?: error("No lang_tag_ids entry for '$tgtTag' in $direction/vocab_ids.json -- this direction can't decode into $targetLang.")
 
         val pre = IndicProcessor.preprocess(text, srcTag, tgtTag)
-        val (encoderHidden, srcLen, hiddenSize) = runEncoder(session.encoder, pre.text, srcTagId, tgtTagId, vocab.eosId)
-        val outputIds = greedyDecode(session.decoder, srcLen, encoderHidden, hiddenSize, vocab)
-        val decoded = detokenize(session.tgtVocab, outputIds, vocab.eosId)
+        val (encoderHidden, srcLen, hiddenSize) = timed("encoder") {
+            runEncoder(session.encoder, pre.text, srcTagId, tgtTagId, vocab.eosId)
+        }
+        val outputIds = timed("decode loop") {
+            greedyDecode(session.decoder, srcLen, encoderHidden, hiddenSize, vocab)
+        }
+        onTiming?.invoke("decode steps", (outputIds.size - 1).toLong()) // -1: seed token isn't a generated step
+        val decoded = timed("detokenize") { detokenize(session.tgtVocab, outputIds, vocab.eosId) }
 
         session.touch()
         return IndicProcessor.postprocess(decoded, tgtTag, pre.placeholders)
@@ -156,19 +182,21 @@ class OnnxMtAdapter(
 
     private fun sessionFor(direction: String): DirectionSession =
         sessions.getOrPut(direction) {
-            val dir = File(modelRoot, direction)
-            val opts = OrtSession.SessionOptions().apply {
-                setIntraOpNumThreads(numThreads) // spec #6.3
-                // CPU only -- spec #6.4: NNAPI is untested and known to partition
-                // VITS/Conformer graphs poorly; no execution provider is added here.
-                registerCustomOpLibrary(OrtxPackage.getLibraryPath()) // ai.onnx.contrib tokenizer op
+            timed("model load ($direction, first use only)") {
+                val dir = File(modelRoot, direction)
+                val opts = OrtSession.SessionOptions().apply {
+                    setIntraOpNumThreads(numThreads) // spec #6.3
+                    // CPU only -- spec #6.4: NNAPI is untested and known to partition
+                    // VITS/Conformer graphs poorly; no execution provider is added here.
+                    registerCustomOpLibrary(OrtxPackage.getLibraryPath()) // ai.onnx.contrib tokenizer op
+                }
+                DirectionSession(
+                    encoder = env.createSession(File(dir, "encoder.int8.onnx").absolutePath, opts),
+                    decoder = env.createSession(File(dir, "decoder.int8.onnx").absolutePath, opts),
+                    vocab = loadVocabIds(File(dir, "vocab_ids.json")),
+                    tgtVocab = loadTgtVocab(File(dir, "tgt_vocab.json")),
+                )
             }
-            DirectionSession(
-                encoder = env.createSession(File(dir, "encoder.int8.onnx").absolutePath, opts),
-                decoder = env.createSession(File(dir, "decoder.int8.onnx").absolutePath, opts),
-                vocab = loadVocabIds(File(dir, "vocab_ids.json")),
-                tgtVocab = loadTgtVocab(File(dir, "tgt_vocab.json")),
-            )
         }.also { it.touch() }
 
     private fun loadVocabIds(path: File): VocabIds {
