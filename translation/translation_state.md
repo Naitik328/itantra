@@ -14,8 +14,9 @@ translation module — don't let it drift from what's actually in
 | Preprocessing (`IndicProcessor.kt` + support files) | Ported faithfully, **compiled + runtime smoke-tested** |
 | Adapter (`OnnxMtAdapter.kt`) | Matches the verified design, **compiled + smoke-tested (pure-logic paths only — see below)** |
 | `languages.json` + `ConfigLoader`/`Orchestrator` | **Built, compiled, smoke-tested** — pivot routing verified against real config |
+| C++ CLI test bench | **Built, compiled, run for real** against real weights — all tested pairs correct, including two-hop pivots |
 | Android Gradle module (real app, real dependencies) | Not started |
-| On-device validation | Not started |
+| On-device validation | Blocked on a clean model-file re-transfer (collaborator's copy was corrupted in transit) |
 
 ---
 
@@ -341,6 +342,50 @@ written references closely:
 pairs: hi→en, te→en, en→hi, en→te, en→bn) now has a curated test file and
 a clean `verify_tokenizer_ids()` pass against real weights.**
 
+### C++ CLI test bench (2026-09-05)
+
+`translation/cli_testbench/translate_cli.cpp` — an interactive command
+line tool: pick source/target language, type text, get a real translation
+back, for any pair among en/hi/te/bn (chaining src→en→tgt for the two
+indic-to-indic pairs, exactly like `Orchestrator.kt`). Pure C++ against
+the ONNX Runtime C++ API directly — no Android, JVM, or Python needed at
+runtime. Mirrors `tools/quantize_and_verify.py`'s `greedy_decode_onnx_
+embedded()` and `OnnxMtAdapter.kt`'s design in lockstep (same scope
+limits: no `IndicProcessor.kt` preprocessing, just the model/tokenizer/
+pivot logic).
+
+**Built and run for real**, not just written — compiled clean against the
+real ONNX Runtime 1.29.0 C++ SDK and tested against the real exported
+models. All tested pairs produced correct output matching prior Python/
+Kotlin verification exactly, including the two-hop chains:
+
+```
+en→hi: "Where is the nearest hospital?" -> निकटतम अस्पताल कहाँ है
+hi→en: "अस्पताल कहाँ है?"                -> Where is the hospital ?
+en→te: "Where is the nearest hospital?" -> సమీప ఆసుపత్రి ఎక్కడ ఉంది
+te→en: "సమీప ఆసుపత్రి ఎక్కడ ఉంది?"       -> Where is the nearest hospital ?
+en→bn: "Where is the nearest hospital?" -> নিকটতম হাসপাতাল কোথায়
+hi→te (two-hop via en): "अस्पताल कहाँ है?"        -> ఆసుపత్రి ఎక్కడ ఉంది ?
+te→hi (two-hop via en): "సమీప ఆసుపత్రి ఎక్కడ ఉంది?" -> निकटतम अस्पताल कहाँ है ?
+```
+
+**A real gotcha found and documented, not just worked around silently:**
+`pip install onnxruntime-extensions`'s `.so` is a CPython extension
+module (undefined symbols like `PyInstanceMethod_Type` that only resolve
+inside a running Python interpreter) — looks standalone from `ldd`/`nm`
+but fails to load in a plain C++ process. The actual standalone build
+comes from the NuGet package (`Microsoft.ML.OnnxRuntime.Extensions`,
+`runtimes/linux-x64/native/libortextensions.so`) — confirmed clean (no
+Python dependency) and this is what the CLI actually uses. Documented in
+`translation/cli_testbench/README.md` so nobody else has to rediscover it
+by trial and error.
+
+**Practical value beyond "another verification pass":** this is now the
+fastest way to manually try a translation in any direction without a
+Gradle build, an Android device, or a JVM — useful for quick sanity
+checks while iterating on anything upstream (a new export, a tokenizer
+change) before reaching for the slower `android_smoketest` path.
+
 ---
 
 ## What's left
@@ -530,3 +575,12 @@ Hindi/English STT/TTS already work.
     default mode 770 silently blocks the app's own uid from reading what
     it just received — CLAUDE.md's "silent failure" pattern showing up in
     a new place).
+- **2026-09-05** — Built `translation/cli_testbench/` — an interactive
+  C++ CLI for testing translation in any direction among en/hi/te/bn
+  without Android/JVM. Compiled and run for real against the real
+  exported models: all tested pairs correct, including both two-hop
+  pivot chains (hi→te, te→hi). Found and documented a real gotcha along
+  the way: the pip-installed `onnxruntime-extensions`'s `.so` is a
+  CPython extension module that fails to load in a plain C++ process;
+  the NuGet package's `libortextensions.so` is the actual standalone
+  build that works.
