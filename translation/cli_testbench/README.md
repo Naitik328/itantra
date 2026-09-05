@@ -116,6 +116,30 @@ never calls it that way — Bengali has no STT (spec §3.4), so `bn` only
 ever appears as a target in production. Useful for testing the model in
 isolation regardless.
 
+## Latency investigation: `--time` and `--num-threads`
+
+Added specifically to investigate a real on-device report of MT adding
+~1.5s to the STT/TTS round trip (`translation/translation_state.md`'s
+latency section has the full writeup):
+
+```bash
+./translate_cli --model-root ... --extensions-lib ... --time --num-threads 4 \
+  --batch example_batch.tsv
+```
+
+`--time` prints per-stage timing to stderr for every translation: model
+load (first use per direction only), encoder, **per-step** decode timing
+plus a loop total, and detokenize. The per-step breakdown is what
+actually matters here — it's what showed decode cost staying flat
+(~36-56ms/step) regardless of prefix length on a 32-token test output,
+directly disproving the "no KV cache means cost grows with output
+length" theory that motivated adding this timer in the first place. Real
+lever found instead: `--num-threads` (default 4, matching spec §6.3) —
+1/2/4/8 threads measured at 2254/1668/1520/1727ms for the same 32-token
+decode, a genuine ~33% swing between 1 and 4. Worth sweeping on whatever
+device you're actually investigating latency on; desktop and phone CPU
+characteristics don't necessarily agree on the optimal count.
+
 ## Can't type Devanagari/Telugu/Bengali into your terminal?
 
 Most terminal setups have no IME for these scripts, so typing `hi`/`te`/

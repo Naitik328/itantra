@@ -292,6 +292,7 @@ class MtEngine {
     Ort::SessionOptions opts;
     opts.RegisterCustomOpsLibrary(extensionsLibPath_.c_str());
     opts.SetIntraOpNumThreads(numThreads_);  // spec #6.3 -- shared numThreads, not per-language
+    opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
     DirectionSession sess;
     std::string dir = modelRoot_ + "/" + direction;
@@ -370,14 +371,21 @@ class MtEngine {
 
     int stepsRun = 0;
     {
-      // One Stopwatch for the WHOLE loop, not per-step -- per-step timing
-      // would itself confirm/refute the no-KV-cache hypothesis (each step
-      // should take measurably longer than the last, since it reprocesses
-      // a longer prefix), but that's a lot of stderr noise for routine use.
-      // Uncomment the per-step Stopwatch below if you need that detail.
+      // Per-step timing (not just the loop total) is what actually settled
+      // a real question: measured 2026-09-05 against a 32-token output,
+      // per-step cost stayed flat (~36-56ms) regardless of prefix length --
+      // it did NOT grow with the no-KV-cache prefix-recompute cost the way
+      // a naive complexity argument predicts. That measurement is why this
+      // codebase does NOT have a KV-cache decoder: the data said it
+      // wouldn't help much for short translations, contradicting the
+      // plausible-sounding assumption that motivated adding this timer in
+      // the first place. Left active (not commented out) because it's the
+      // single most diagnostic signal here, not noise -- see
+      // translation/translation_state.md's latency section for the full
+      // writeup and what to check if you're revisiting this.
       Stopwatch sw("decode loop total");
       for (int step = 0; step < kMaxNewTokens; step++) {
-        // Stopwatch stepSw("  decode step " + std::to_string(step) + " (prefix_len=" + std::to_string(decoderIds.size()) + ")");
+        Stopwatch stepSw("  decode step " + std::to_string(step) + " (prefix_len=" + std::to_string(decoderIds.size()) + ")");
         int64_t curLen = static_cast<int64_t>(decoderIds.size());
         int64_t idsShape[] = {1, curLen};
         Ort::Value idsTensor = Ort::Value::CreateTensor<int64_t>(memInfo, decoderIds.data(), decoderIds.size(), idsShape, 2);

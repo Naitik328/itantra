@@ -417,56 +417,85 @@ STT-side version of this same problem.
 
 #### Issue B: MT adds ~1.5s of latency to the STT/TTS round trip (was ~1s, now ~2.5s)
 
-Investigated immediately with real measurements, not guessed at. Added
-`--time`/`--num-threads` to `translation/cli_testbench/translate_cli.cpp`
-and measured real per-stage cost on desktop against the real models:
+Investigated immediately with real measurements. Added `--time`/
+`--num-threads` to `translation/cli_testbench/translate_cli.cpp` and
+measured real per-stage cost on desktop against the real models:
 
 | Stage | Desktop time |
 |---|---|
 | Model load (per direction, first use only) | 782–1051 ms |
-| Encoder (tokenize + encode) | 4–7 ms |
-| **Decode loop (5–8 output tokens)** | **85–391 ms** |
+| Encoder (tokenize + encode) | 4–12 ms |
+| Decode loop (5–8 output tokens, typical message) | 85–391 ms |
 | Detokenize | 0 ms |
 
-The decode loop is already disproportionately expensive for tiny outputs
-on a fast x86 desktop — the no-KV-cache design
+**First hypothesis (no KV cache) — tested directly, and disproven.**
+The obvious theory: no-KV-cache means every decode step reprocesses the
+whole prefix, so cost should grow with output length
 (`export_indictrans2_onnx.py`'s own documented tradeoff, flagged from the
 start as something to revisit "if on-device benchmarking shows this is
-actually too slow") recomputes the full prefix every step. A phone's ARM
-CPU is typically far slower per-op (spec's own performance table
-estimates 10–20x slower than desktop for STT/TTS); if MT scales
-similarly, this alone could plausibly account for the full ~1.5s.
+actually too slow"). Tested it directly with per-step timing on a
+32-token output instead of assuming: **per-step cost stayed flat, ~36-56ms
+regardless of whether the prefix was 2 tokens or 32.** The redundant
+prefix recomputation a KV cache would eliminate is *not* the dominant
+cost here. Also tried explicit `ORT_ENABLE_ALL` graph optimization — no
+measurable change. **Conclusion: building real KV-cache support (re-
+exporting the decoder, rewriting the decode loop in three places to stay
+in lockstep) would likely deliver far less benefit than the plausible-
+sounding theory suggested, for the short chat-message outputs this app
+actually produces.** Not building it on that basis — measuring first is
+what caught this before real engineering time went into it.
 
-**Model load (780–1050ms) is the other real suspect**, but a *different*
-problem needing a *different* fix: cheap if a model stays resident across
-a conversation, expensive if residency logic reloads it on every message.
-**Not yet known which one dominates** — needs one fact: was the 2.5s
-measured on the first message of a session, or steady-state after models
-were already warmed up? Added the same opt-in stage timing directly to
-`OnnxMtAdapter.kt` (a nullable `onTiming` callback, zero cost if unused)
-so the next real-device test run can answer this definitively instead of
-guessing further. Whoever wires up the real `Orchestrator` should pass a
-callback like `{ stage, ms -> Log.d("MT_TIMING", "$stage: ${ms}ms") }` for
-one test run.
+**What does matter: thread count.** 1 thread → 2254ms, 2 threads →
+1668ms, 4 threads → 1520ms, 8 threads → 1727ms (worse — oversubscription)
+for the same 32-token decode. Real, ~33% swing between 1 and 4 threads,
+meaning each step is doing genuine parallelizable compute — just compute
+that doesn't scale with prefix length the way redundant recomputation
+would. Points at the per-step cost being close to the fixed cost of one
+18-layer transformer forward pass on this hardware, not easily reduced by
+ONNX Runtime session-level configuration.
 
-**Not yet decided:** the actual fix. A confirmed decode-loop bottleneck
-points at needing real KV-cache support in the decoder export (the
-`export_indictrans2_onnx.py` tradeoff explicitly deferred, not revisited
-yet) — real engineering effort, re-exporting the decoder and rewriting
-the greedy-decode loop in three places (Python reference, Kotlin adapter,
-C++ CLI) to stay in lockstep. A confirmed reload-on-every-message problem
-would be much cheaper to fix (keep both directions resident, or raise the
-idle timeout). Don't build either until the diagnostic above says which.
+**Still not resolved: model load (780-1050ms) vs. decode loop as the
+dominant contributor to the reported 2.5s.** These need different fixes
+(residency tuning vs. accepting/optimizing inherent per-step compute) and
+desktop CPU characteristics (cache size, memory bandwidth, SIMD width)
+don't necessarily transfer to ARM mobile chips the way relative *stage*
+proportions might. Needs one fact from a real device: was the 2.5s
+measured on the first message of a session (points at load/residency), or
+steady-state after models were already warmed up (points at decode, and
+means the flat-per-step-cost finding above should be re-checked on-device
+too, since ARM's memory-bandwidth-vs-compute balance could differ from
+x86's enough to change the conclusion). Added the same opt-in stage
+timing directly to `OnnxMtAdapter.kt` (a nullable `onTiming` callback,
+zero cost if unused) — wire it to `Log.d` for one test run to get this.
+
+**Revised plan, in order of cost:**
+1. Test `numThreads` on the real device (2/4/8) — cheap, already shown to
+   matter on desktop, direction unconfirmed for phone hardware.
+2. Get the cold-vs-steady-state + per-step-on-ARM data from a real device
+   run before spending more engineering time in either direction.
+3. If load/residency dominates: keep both directions resident instead of
+   evicting, or raise `idleTimeoutMillis` — cheap.
+4. If decode genuinely dominates on-device *and* per-step cost turns out
+   to grow with prefix length on ARM (unlike desktop): revisit KV-cache,
+   now with real on-device evidence instead of a plausible-sounding
+   theory.
+5. If decode dominates but per-step cost is flat on-device too (matching
+   desktop): the cost is likely close to inherent for this model size at
+   this quantization level. Real fixes there are a smaller/distilled
+   decoder (retraining, out of scope here) or accepting the cost and
+   hiding it in the UI (show original text immediately, translate/
+   synthesize in the background) rather than a model-level fix.
 
 ---
 
 ## What's left
 
-1. **Diagnose and fix the ~1.5s MT latency (Issue B above).** Real
-   desktop numbers point at the no-KV-cache decode loop; needs one
-   confirming fact (cold vs. steady-state) from a real device run with
-   `OnnxMtAdapter`'s new `onTiming` callback wired to `Log.d` before
-   committing to a fix.
+1. **Diagnose and fix the ~1.5s MT latency (Issue B above).** No-KV-cache
+   was the obvious first theory and it's already been directly measured
+   and ruled out (per-step decode cost is flat, not growing with prefix
+   length) — don't re-propose it without new on-device evidence. Needs a
+   real device run with `OnnxMtAdapter`'s new `onTiming` callback wired to
+   `Log.d`, plus a `numThreads` sweep (2/4/8), before committing to a fix.
 2. **Diagnose the proper-noun/name mistranslation problem (Issue A
    above).** Needs concrete repro examples (exact input/expected/actual,
    language pair) before anything can be proposed — could be an STT, MT,
@@ -670,3 +699,21 @@ Hindi/English STT/TTS already work.
   a real device run can confirm whether the decode loop or a reload-per-
   message residency problem dominates before committing to a fix for
   either.
+- **2026-09-05** — Went one step further on the latency investigation
+  before proposing a fix: measured **per-step** decode timing (not just
+  the loop total) against a 32-token output. Found per-step cost stays
+  flat (~36-56ms) regardless of prefix length — the no-KV-cache
+  redundant-recompute theory, while plausible, does not hold up under
+  direct measurement for this model at these output lengths. Also tested
+  `numThreads` (1/2/4/8: 2254/1668/1520/1727ms) — real ~33% swing,
+  4 is the current desktop sweet spot — and explicit
+  `ORT_ENABLE_ALL` graph optimization (no measurable change). **Decided
+  not to build KV-cache support on this evidence** — it would likely
+  deliver far less benefit than assumed for short chat-message outputs,
+  and building it anyway would have been the exact mistake this project
+  has repeatedly caught itself almost making. Revised the latency plan in
+  `translation_state.md` accordingly: get on-device cold-vs-steady-state
+  and per-step-on-ARM data before deciding between residency tuning,
+  reconsidering KV-cache with real on-device evidence, or accepting the
+  cost as near-inherent to this model size and hiding it in the UI
+  instead.
